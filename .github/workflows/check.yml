@@ -1,0 +1,69 @@
+name: Проверка доступности
+
+on:
+  schedule:
+    # ⚠️ ПЯТЬ МИНУТ — ЭТО МИНИМУМ, РАЗРЕШЁННЫЙ GitHub, а не наш выбор. И расписание у них
+    # НЕТОЧНОЕ: запуски задерживаются, при нагрузке пропускаются. Реальная задержка обнаружения —
+    # от 5 до 15 минут. Для отказа длиной 2,5 часа (28.08.2026) этого достаточно; обещать
+    # «узнаете через минуту» нельзя, и не надо.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+# Право писать в репозиторий: результат проверки коммитится сюда же.
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+# Два прогона разом писали бы в один файл истории и рвали друг другу коммит.
+concurrency:
+  group: status-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Проверить цели снаружи
+        id: probe
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node check.mjs
+
+      - name: Собрать страницу
+        run: node render.mjs
+
+      - name: Записать результат
+        # ⚠️ ТОЛЬКО ПРИ СМЕНЕ СОСТОЯНИЯ. Коммит на каждую проверку — это 8600 коммитов в месяц и
+        # нечитаемая история; сама проверка при этом не станет ни точнее, ни быстрее.
+        if: steps.probe.outputs.changed == 'true'
+        run: |
+          git config user.name "status-bot"
+          git config user.email "status-bot@users.noreply.github.com"
+          git add data/history.json index.html
+          git commit -m "статус: смена состояния $(date -u +%F\ %T) UTC" || echo "нечего коммитить"
+          git push
+
+      - name: Опубликовать страницу
+        # 🔴 ПУБЛИКУЕМ ВСЕГДА, а не только при смене состояния — в отличие от коммита истории.
+        # Разница существенная: на странице стои́т время последней проверки, и если публиковать её
+        # лишь при изменениях, в спокойную неделю там будет висеть прошлогодняя дата. Страница со
+        # старой датой читается как «монитор умер», то есть молчание наблюдателя стало бы
+        # неотличимо от молчания наблюдаемого — ровно тот класс, ради которого всё это заводилось.
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          # ⚠️ Ветка `gh-pages` переписывается одним коммитом, а не растёт. Иначе публикация
+          # каждые пять минут дала бы 100 тысяч коммитов за год — та самая беда, из-за которой мы
+          # не берём готовый Upptime.
+          force_orphan: true
+          # На странице нужен только index.html и данные; остальное — служебное.
+          exclude_assets: ".github,check.mjs,render.mjs,targets.json,README.md"
