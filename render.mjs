@@ -40,6 +40,7 @@ const rows = services
         <li class="row nf-in" style="animation-delay:${120 + i * 45}ms">
           <span class="row-name">${esc(name)}</span>
           <span class="row-state ${r.ok ? "is-up" : "is-down"}">
+            ${r.ok && typeof r.ms === "number" ? `<span class="row-ms">${r.ms} мс</span>` : ""}
             <span class="dot" aria-hidden="true"></span>${r.ok ? "работает" : "не отвечает"}
           </span>
         </li>`,
@@ -198,6 +199,22 @@ writeFileSync(
   .row-state { display: inline-flex; align-items: center; gap: .5rem; font-size: .875rem; white-space: nowrap; }
   .row-state.is-up { color: hsl(var(--success)); }
   .row-state.is-down { color: hsl(var(--destructive)); }
+  /**
+   * ВРЕМЯ ОТВЕТА — ПРИГЛУШЁННЫМ И БЕЗ ПОЯСНЕНИЙ (возвращено 29.08.2026 по просьбе владельца).
+   *
+   * 🔴 ПОЧЕМУ ОНО УХОДИЛО И ПОЧЕМУ ВЕРНУЛОСЬ В ДРУГОМ ВИДЕ. 28.08 миллисекунды сняли вместе с
+   * абзацем-оправданием под ними: они не отвечают на вопрос, с которым сюда приходят («это у меня
+   * или у них?»), а число вроде «2842 мс» без контекста пугает того, кто просто зашёл.
+   *
+   * Вернулись они мелкими и серыми РЯДОМ со словом «работает», а не вместо него. Порядок чтения
+   * сохранён: сначала ответ на главный вопрос, потом подробность для того, кто её искал. Абзац
+   * под таблицей не возвращён намеренно — если число требует объяснения, объяснять надо число,
+   * а не заводить абзац.
+   *
+   * У неотвечающей цели времени НЕ показываем: там оно означало бы «сколько ждали до отказа», то
+   * есть совсем другую величину под тем же видом.
+   */
+  .row-ms { color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; font-size: .8125rem; }
   .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; flex: none; }
 
   .event { display: flex; gap: .875rem; padding: .6875rem 1.125rem; font-size: .875rem; }

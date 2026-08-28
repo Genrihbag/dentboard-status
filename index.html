@@ -123,6 +123,22 @@
   .row-state { display: inline-flex; align-items: center; gap: .5rem; font-size: .875rem; white-space: nowrap; }
   .row-state.is-up { color: hsl(var(--success)); }
   .row-state.is-down { color: hsl(var(--destructive)); }
+  /**
+   * ВРЕМЯ ОТВЕТА — ПРИГЛУШЁННЫМ И БЕЗ ПОЯСНЕНИЙ (возвращено 29.08.2026 по просьбе владельца).
+   *
+   * 🔴 ПОЧЕМУ ОНО УХОДИЛО И ПОЧЕМУ ВЕРНУЛОСЬ В ДРУГОМ ВИДЕ. 28.08 миллисекунды сняли вместе с
+   * абзацем-оправданием под ними: они не отвечают на вопрос, с которым сюда приходят («это у меня
+   * или у них?»), а число вроде «2842 мс» без контекста пугает того, кто просто зашёл.
+   *
+   * Вернулись они мелкими и серыми РЯДОМ со словом «работает», а не вместо него. Порядок чтения
+   * сохранён: сначала ответ на главный вопрос, потом подробность для того, кто её искал. Абзац
+   * под таблицей не возвращён намеренно — если число требует объяснения, объяснять надо число,
+   * а не заводить абзац.
+   *
+   * У неотвечающей цели времени НЕ показываем: там оно означало бы «сколько ждали до отказа», то
+   * есть совсем другую величину под тем же видом.
+   */
+  .row-ms { color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; font-size: .8125rem; }
   .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; flex: none; }
 
   .event { display: flex; gap: .875rem; padding: .6875rem 1.125rem; font-size: .875rem; }
@@ -160,7 +176,7 @@
   <div class="hero ok nf-in" style="animation-delay:60ms">
     <span class="hero-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg></span>
     <h1>Все сервисы работают</h1>
-    <p>Проверено 28.08.2026, 13:45</p>
+    <p>Проверено 28.08.2026, 15:14</p>
   </div>
 
   <section class="card nf-in" style="animation-delay:100ms">
@@ -168,24 +184,28 @@
         <li class="row nf-in" style="animation-delay:120ms">
           <span class="row-name">Сайт</span>
           <span class="row-state is-up">
+            <span class="row-ms">667 мс</span>
             <span class="dot" aria-hidden="true"></span>работает
           </span>
         </li>
         <li class="row nf-in" style="animation-delay:165ms">
           <span class="row-name">Кабинет лаборатории</span>
           <span class="row-state is-up">
+            <span class="row-ms">497 мс</span>
             <span class="dot" aria-hidden="true"></span>работает
           </span>
         </li>
         <li class="row nf-in" style="animation-delay:210ms">
           <span class="row-name">Кабинет заказчика</span>
           <span class="row-state is-up">
+            <span class="row-ms">570 мс</span>
             <span class="dot" aria-hidden="true"></span>работает
           </span>
         </li>
         <li class="row nf-in" style="animation-delay:255ms">
           <span class="row-name">API</span>
           <span class="row-state is-up">
+            <span class="row-ms">503 мс</span>
             <span class="dot" aria-hidden="true"></span>работает
           </span>
         </li></ul>

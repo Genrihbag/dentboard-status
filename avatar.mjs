@@ -145,9 +145,43 @@ export function loadState() {
   }
 }
 
+/**
+ * Различаются ли ЗНАЧИМЫЕ поля решения. Отметка времени намеренно не в счёт: она меняется каждым
+ * прогоном, и по ней «состояние тронули» было бы истиной всегда.
+ */
+export function stateDiffers(a, b) {
+  const norm = (x) => ({
+    applied: x?.applied ?? null,
+    pending: x?.pending ?? null,
+    streak: Number(x?.streak ?? 0),
+  });
+  const [p, q] = [norm(a), norm(b)];
+  return p.applied !== q.applied || p.pending !== q.pending || p.streak !== q.streak;
+}
+
+/**
+ * Записать решение. Возвращает `true`, если ЗНАЧИМОЕ содержимое изменилось, — по этому признаку
+ * задание решает, коммитить ли файл.
+ *
+ * 🔴 БЕЗ ЭТОГО ПРИЗНАКА ГИСТЕРЕЗИС НЕ РАБОТАЛ ВОВСЕ. Найдено 29.08.2026 по вопросу владельца
+ * «почему фото канала не меняется»; в репозитории лежало состояние `applied: null` при
+ * `streak: 2`, а журналы показывали смену кадра почти на каждом прогоне — то up, то slow.
+ *
+ * Причина: файл коммитился ТОЛЬКО когда менялось состояние истории, то есть когда цель падала или
+ * поднималась. Смена авы по медленным ответам историю не меняет — значит `data/avatar.json` не
+ * коммитился вовсе. Задание GitHub умирает вместе с файловой системой, следующий прогон брал из
+ * репозитория старую копию с `applied: null` и попадал в ветку «первый прогон — ставим сразу».
+ * Ава переставлялась каждый прогон, подтверждения не копились никогда, а по виду всё работало.
+ *
+ * ⚠️ ПРЕДУПРЕЖДЕНИЕ ОБ ЭТОМ БЫЛО ЗАПИСАНО В САМОМ ЗАДАНИИ ДОСЛОВНО («гистерезис не срабатывал бы
+ * НИКОГДА, оставаясь по виду настроенным») — и условие строкой ниже его вызывало. Решение
+ * записанное, прочитанное и не исполненное.
+ */
 export function saveState(state) {
+  const before = loadState();
   mkdirSync("data", { recursive: true });
   writeFileSync(STATE, `${JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2)}\n`);
+  return stateDiffers(before, state);
 }
 
 /**
@@ -259,16 +293,17 @@ export async function syncAvatar(results) {
   const d = decide(prev, observed);
 
   if (!d.change) {
-    saveState({ applied: prev.applied ?? null, pending: d.pending, streak: d.streak });
+    const persisted = saveState({ applied: prev.applied ?? null, pending: d.pending, streak: d.streak });
     console.log(
       `[аватар] состояние «${observed}», на аве «${prev.applied ?? "—"}»` +
         (d.pending ? `, подтверждений ${d.streak} из ${CONFIRMATIONS}` : ", менять нечего"),
     );
-    return { changed: false, state: prev.applied ?? null, observed };
+    return { changed: false, state: prev.applied ?? null, observed, persisted };
   }
 
   const ok = await setChatPhoto(d.next);
-  if (ok) saveState({ applied: d.next, pending: null, streak: 0 });
-  else saveState({ applied: prev.applied ?? null, pending: observed, streak: CONFIRMATIONS });
-  return { changed: ok, state: ok ? d.next : (prev.applied ?? null), observed };
+  const persisted = ok
+    ? saveState({ applied: d.next, pending: null, streak: 0 })
+    : saveState({ applied: prev.applied ?? null, pending: observed, streak: CONFIRMATIONS });
+  return { changed: ok, state: ok ? d.next : (prev.applied ?? null), observed, persisted };
 }
