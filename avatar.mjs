@@ -154,12 +154,70 @@ export async function setChatPhoto(state) {
   const payload = await res.json().catch(() => ({}));
   if (payload.ok) {
     console.log(`[аватар] поставлен кадр «${state}» (${path})`);
+    await sweepServiceMessage(token, chat);
     return true;
   }
   // Причина печатается СЛОВАМИ Telegram: «бот не админ» и «нет права менять профиль» лечатся
   // по-разному, а «не получилось» не лечится никак.
   console.error(`[аватар] Telegram отказал: ${payload.description ?? res.status}`);
   return false;
+}
+
+/**
+ * УБРАТЬ СЛУЖЕБНЫЙ ПОСТ «фото канала изменено».
+ *
+ * 🔴 ЗАЧЕМ. Смена аватара оставляет в ленте служебное сообщение, и подписчики видят его как пост.
+ * Канал заводился ради редких сообщений о сбоях; пост на каждую смену цвета превращает его в
+ * шумную ленту — а шум учит пролистывать, и первым пролистают настоящий сбой.
+ *
+ * ⚠️ ПОЧЕМУ ТАК СТРАННО, А НЕ «УДАЛИТЬ ПО ID». Потому что id взять неоткуда: `setChatPhoto`
+ * возвращает `true`, а не сообщение; `getUpdates` боту с установленным вебхуком отвечает `409`.
+ * Поэтому id вычисляется: шлём собственное короткое сообщение (его id известен) и удаляем ДВА —
+ * своё и предыдущее. Служебное стоит ровно перед нашим, потому что между ними ничего не успевает
+ * произойти: в этот канал пишет только бот.
+ *
+ * ⚠️ ГРАНИЦА ПРИЁМА НАЗВАНА ЧЕСТНО: если в тот же миг в канал напишет человек, удалится ЕГО
+ * сообщение вместо служебного. Риск принят осознанно — канал служебный, людей-авторов в нём нет.
+ * Если появятся, эту уборку надо будет снять, а не «улучшить»: угадывание чужого id безопаснее не
+ * становится.
+ *
+ * НИКОГДА НЕ БРОСАЕТ и не влияет на исход смены аватара: ава уже поставлена, и неудача уборки —
+ * косметика, которая не имеет права утащить за собой запись состояния.
+ */
+async function sweepServiceMessage(token, chat) {
+  try {
+    const probe = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // Текст виден доли секунды; точка — чтобы не мелькало слово, которое кто-то успеет прочесть.
+      body: JSON.stringify({ chat_id: chat, text: ".", disable_notification: true }),
+    });
+    const sent = await probe.json().catch(() => ({}));
+    const id = sent?.result?.message_id;
+    if (!id) {
+      console.log(`[аватар] служебный пост не убран: ${sent.description ?? "нет message_id"}`);
+      return;
+    }
+    const drop = async (messageId) => {
+      const r = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chat, message_id: messageId }),
+      });
+      const d = await r.json().catch(() => ({}));
+      return Boolean(d.ok);
+    };
+    const mine = await drop(id);
+    const service = await drop(id - 1);
+    // Печатается ИСХОД КАЖДОГО удаления: «убрано» и «не смогли» иначе выглядят одинаково — тишиной,
+    // а не смогли мы, скорее всего, из-за отсутствия права удалять сообщения у бота.
+    console.log(
+      `[аватар] уборка ленты: своё сообщение ${mine ? "удалено" : "НЕ удалено"}, ` +
+        `служебное ${service ? "удалено" : "НЕ удалено (нужно право «Удаление сообщений»)"}`,
+    );
+  } catch (e) {
+    console.log(`[аватар] уборка ленты не удалась: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**
