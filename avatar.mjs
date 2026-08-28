@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+/**
+ * АВАТАР КАНАЛА ПО СОСТОЯНИЮ СЕРВИСОВ. Исполняется на машинах GitHub, рядом с самой проверкой.
+ *
+ * 🔴 ПОЧЕМУ ЗДЕСЬ, А НЕ В НАШЕМ ПРИЛОЖЕНИИ. По той же причине, по какой здесь живёт вся проверка:
+ * сменить аву «сервисы недоступны» обязан тот, кто НЕ зависит от этих сервисов. Код, живущий на
+ * наблюдаемой машине, в нужный момент недоступен вместе с ней — и картинка осталась бы зелёной
+ * ровно тогда, когда должна стать красной. 28.08.2026 это стоило 2 ч 29 мин, в течение которых
+ * внутреннее наблюдение рапортовало здоровье и было право: изнутри всё работало.
+ *
+ * ⚠️ ТОЛЬКО СТАТИЧНОЕ ФОТО. `setChatPhoto` в Bot API принимает поле `photo` и ничего больше:
+ * анимированную аву (видео-кружок в профиле) ставит лишь официальное приложение через MTProto.
+ * GIF здесь поставить нельзя — не «сложно», а нечем. Поэтому кадры лежат тремя PNG.
+ *
+ * ⚠️ СМЕНА ФОТО ОСТАВЛЯЕТ СЛУЖЕБНОЕ СООБЩЕНИЕ В ЛЕНТЕ КАНАЛА — подписчики видят его как пост.
+ * Отсюда гистерезис: мигание одной цели не должно засорять канал. Два подряд одинаковых прогона —
+ * и только тогда смена.
+ */
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+
+/** Где храним решение об аватаре. РЯДОМ с историей: перезапуск не должен переставлять аву впустую. */
+const STATE = "data/avatar.json";
+
+/**
+ * Порог «медленно», мс. В конфиге, а не в коде: 1500 — стартовое значение, а не измеренное.
+ * Настоящее придёт из наблюдения, и менять его придётся, не трогая логику.
+ */
+export const SLOW_MS = Number(process.env.STATUS_SLOW_MS ?? 1500);
+
+/**
+ * Сколько подряд прогонов с новым значением нужно, чтобы сменить аву.
+ *
+ * ⚠️ ДВА, А НЕ ОДИН, И ЭТО НЕ ОСТОРОЖНОСТЬ РАДИ ОСТОРОЖНОСТИ. Проверка идёт раз в пять минут, у
+ * каждой цели три попытки внутри прогона; одиночный провал после этого — почти всегда сеть между
+ * GitHub и РФ, а не наш отказ. Реакция на него стоила бы поста в канале и обучила бы подписчиков
+ * не смотреть на аву. Цена задержки при настоящем отказе — те же пять минут, и она приемлема:
+ * отказ 28.08 длился 149 минут.
+ */
+export const CONFIRMATIONS = Number(process.env.STATUS_CONFIRMATIONS ?? 2);
+
+/** Кадр на каждое состояние. Файл отсутствует — отказ, а не тихая подстановка соседнего. */
+const FRAME = {
+  up: "avatar/status-up.png",
+  slow: "avatar/status-slow.png",
+  down: "avatar/status-down.png",
+};
+
+/**
+ * СВОД РЕЗУЛЬТАТОВ К ОДНОМУ СОСТОЯНИЮ. Чистая функция — проверяется без сети и без Telegram.
+ *
+ * 🔴 КРАСНАЯ — ТОЛЬКО КОГДА ЛЕЖИТ ВСЁ (решение владельца 28.08.2026). Один отвалившийся сервис —
+ * ЖЁЛТАЯ, потому что продукт при этом работает: упавший портал заказчиков не мешает лаборатории
+ * принимать наряды, а упавший API — да, но это уже «всё» с точки зрения человека, который смотрит
+ * на аву. Красная на каждую частную неисправность обесценила бы красную вообще: подписчик
+ * перестанет отличать «не работает ничего» от «не работает одно из четырёх».
+ *
+ * Жёлтая, таким образом, значит «есть проблемы» и включает ДВА разных повода — часть целей не
+ * ответила ЛИБО все ответили, но медленно. Для картинки это одно и то же сообщение человеку
+ * («что-то не так, подробности на странице»), и разделять их значило бы завести третий кадр,
+ * который ничего не добавляет.
+ *
+ * Порядок веток значим: «лежит всё» проверяется раньше «лежит часть».
+ */
+export function stateOf(results, slowMs = SLOW_MS) {
+  const rows = Object.values(results);
+  // Пустой вход — НЕ «всё хорошо». Ноль осмотренных целей и ноль упавших выглядят одинаково
+  // только в отчёте, где их не различают; здесь различаем.
+  if (rows.length === 0) return "unknown";
+  const down = rows.filter((r) => !r.ok).length;
+  if (down === rows.length) return "down";
+  if (down > 0) return "slow";
+  if (rows.some((r) => typeof r.ms === "number" && r.ms > slowMs)) return "slow";
+  return "up";
+}
+
+/**
+ * РЕШЕНИЕ О СМЕНЕ — тоже чистая функция, и это главное в файле: гистерезис проверяется образцами,
+ * а не наблюдением за живым каналом неделю.
+ *
+ * `applied` — что сейчас на аватаре, `pending`/`streak` — сколько прогонов подряд мы видим новое
+ * значение. Возврат `{ next, streak, change }`: «менять» и «ещё рано» обязаны быть разными
+ * значениями, а не разной интонацией лога.
+ */
+export function decide(prev, observed, confirmations = CONFIRMATIONS) {
+  const applied = prev?.applied ?? null;
+  // Неизвестное состояние аву не трогает: это «мы не смогли посмотреть», а не «стало плохо».
+  if (observed === "unknown") return { next: applied, streak: 0, pending: null, change: false };
+
+  // Наблюдаем то же, что уже стои́т, — счётчик обнуляется. Иначе редкие одиночные отклонения
+  // накопились бы за сутки и однажды сменили аву без настоящего повода.
+  if (observed === applied) return { next: applied, streak: 0, pending: null, change: false };
+
+  /**
+   * ПЕРВЫЙ В ЖИЗНИ ПРОГОН СТАВИТ АВУ СРАЗУ, минуя подтверждения.
+   *
+   * ⚠️ ЭТУ ВЕТКУ ПОЙМАЛ ТЕСТ, А НЕ ЧТЕНИЕ: комментарий про «первый прогон» стоял НИЖЕ проверки
+   * `streak < confirmations`, то есть до него не доходило — при пустом состоянии первый прогон
+   * честно ждал второго. Читалось как реализованное правило, работало как его отсутствие. Цена:
+   * на канале до второго прогона висел бы кадр, не отвечающий ни одному состоянию, а молчание
+   * выглядело бы как «всё хорошо».
+   */
+  if (applied === null) return { next: observed, streak: 0, pending: null, change: true };
+
+  const streak = (prev?.pending === observed ? (prev?.streak ?? 0) : 0) + 1;
+  if (streak < confirmations) return { next: applied, streak, pending: observed, change: false };
+
+  return { next: observed, streak: 0, pending: null, change: true };
+}
+
+/** Прочитать сохранённое решение. Отсутствие файла — законное «ещё не ставили». */
+export function loadState() {
+  if (!existsSync(STATE)) return { applied: null, pending: null, streak: 0 };
+  try {
+    return JSON.parse(readFileSync(STATE, "utf8"));
+  } catch {
+    // Битый файл — не повод падать: хуже потерять проверку целиком, чем один раз переставить аву.
+    // Но и молчать нельзя — иначе «состояние сброшено» неотличимо от «состояние такое».
+    console.warn(`[аватар] ${STATE} не разобрался — считаю, что аву ещё не ставили`);
+    return { applied: null, pending: null, streak: 0 };
+  }
+}
+
+export function saveState(state) {
+  mkdirSync("data", { recursive: true });
+  writeFileSync(STATE, `${JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2)}\n`);
+}
+
+/**
+ * Поставить фото канала. Возвращает `true`, если Telegram принял.
+ *
+ * ⚠️ НИКАКИХ ПОВТОРОВ ВНУТРИ ОДНОГО ПРОГОНА. Прогон идёт каждые пять минут — это и есть повтор,
+ * причём с заново измеренным состоянием. Цикл ретраев внутри означал бы, что мы держим задание
+ * GitHub и упорно ставим картинку, про которую уже, возможно, неправда.
+ */
+export async function setChatPhoto(state) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chat = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chat) {
+    console.log("[аватар] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — фото не меняем");
+    return false;
+  }
+  const path = FRAME[state];
+  if (!path || !existsSync(path)) {
+    // Отказ НАЗЫВАЕТ файл: подстановка соседнего кадра означала бы врать про состояние картинкой.
+    console.error(`[аватар] нет кадра для состояния «${state}» (ожидался ${path})`);
+    return false;
+  }
+
+  const form = new FormData();
+  form.append("chat_id", chat);
+  form.append("photo", new Blob([readFileSync(path)], { type: "image/png" }), path.split("/").pop());
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/setChatPhoto`, { method: "POST", body: form });
+  const payload = await res.json().catch(() => ({}));
+  if (payload.ok) {
+    console.log(`[аватар] поставлен кадр «${state}» (${path})`);
+    return true;
+  }
+  // Причина печатается СЛОВАМИ Telegram: «бот не админ» и «нет права менять профиль» лечатся
+  // по-разному, а «не получилось» не лечится никак.
+  console.error(`[аватар] Telegram отказал: ${payload.description ?? res.status}`);
+  return false;
+}
+
+/**
+ * Свести всё вместе: посмотреть на результаты, решить, при необходимости — поставить.
+ *
+ * ⚠️ СОСТОЯНИЕ СОХРАНЯЕТСЯ ТОЛЬКО ПОСЛЕ УСПЕХА `setChatPhoto`. Запиши мы решение до отправки —
+ * неудача Telegram (сеть, лимит, снятое право) осталась бы записанной как сделанная, и следующий
+ * прогон не повторил бы попытку: ава осталась бы прежней НАВСЕГДА, а файл утверждал бы обратное.
+ * Счётчик подтверждений при этом сохраняется всегда — он про наблюдение, а не про отправку.
+ */
+export async function syncAvatar(results) {
+  const observed = stateOf(results);
+  const prev = loadState();
+  const d = decide(prev, observed);
+
+  if (!d.change) {
+    saveState({ applied: prev.applied ?? null, pending: d.pending, streak: d.streak });
+    console.log(
+      `[аватар] состояние «${observed}», на аве «${prev.applied ?? "—"}»` +
+        (d.pending ? `, подтверждений ${d.streak} из ${CONFIRMATIONS}` : ", менять нечего"),
+    );
+    return { changed: false, state: prev.applied ?? null, observed };
+  }
+
+  const ok = await setChatPhoto(d.next);
+  if (ok) saveState({ applied: d.next, pending: null, streak: 0 });
+  else saveState({ applied: prev.applied ?? null, pending: observed, streak: CONFIRMATIONS });
+  return { changed: ok, state: ok ? d.next : (prev.applied ?? null), observed };
+}
