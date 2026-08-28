@@ -4,28 +4,32 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="120">
-<meta name="description" content="Состояние сервисов DentBoard: сайт, кабинет лаборатории, кабинет заказчика, API. Проверка снаружи каждые 5 минут.">
+<meta name="robots" content="noindex, follow">
+<meta name="description" content="Состояние сервисов DentBoard. Проверка снаружи каждые 5 минут.">
 <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#fbfdfe" media="(prefers-color-scheme: light)">
-<title>Все сервисы работают — состояние DentBoard</title>
+<meta name="theme-color" content="#f1f5f9" media="(prefers-color-scheme: light)">
+<title>Все сервисы работают — DentBoard</title>
+<!-- Значки — те же файлы, что у сайта. Вкладка без знака читается как чужая страница, а сюда
+     приходят ровно тогда, когда сомневаются, туда ли попали. -->
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="apple-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<!-- Inter — тот же шрифт, что в кабинетах. `display=swap`, чтобы текст был виден сразу: страницу
-     открывают, когда что-то сломалось, и ждать шрифт в этот момент неуместно. Системный стек в
-     fallback обязателен — Google Fonts тоже бывают недоступны. -->
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap&subset=cyrillic,latin" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap&subset=cyrillic,latin" rel="stylesheet">
 <style>
   /* ТОКЕНЫ ПРОДУКТА — дословно из packages/ui/src/styles/globals.css, обе темы. */
   :root {
     --background: 210 40% 99%;
     --foreground: 222 47% 11%;
     --card: 0 0% 100%;
-    --primary: 184 77% 29%;
+    --muted: 210 40% 96%;
     --muted-foreground: 215 16% 45%;
+    --primary: 184 77% 29%;
+    --info: 205 85% 45%;
     --border: 214 32% 91%;
     --success: 142 66% 31%;
     --destructive: 0 72% 51%;
-    --accent: 184 52% 94%;
     --radius: 0.625rem;
   }
   @media (prefers-color-scheme: dark) {
@@ -33,165 +37,160 @@
       --background: 222 47% 8%;
       --foreground: 210 40% 98%;
       --card: 222 40% 11%;
-      --primary: 184 62% 44%;
+      --muted: 217 33% 16%;
       --muted-foreground: 215 20% 65%;
+      --primary: 184 62% 44%;
+      --info: 205 80% 58%;
       --border: 217 33% 20%;
-      /* Светлее дневного (31 %): на тёмном фоне тот же зелёный ушёл бы в грязь. Отдельные
-         значения для тёмной темы — правило продукта, а не инверсия дневных. */
+      /* Светлее дневного (31 %): на тёмном фоне тот же зелёный ушёл бы в грязь. Тёмная тема имеет
+         СВОИ значения, а не инверсию дневных — правило продукта. */
       --success: 142 60% 45%;
       --destructive: 0 72% 60%;
-      --accent: 185 45% 16%;
     }
   }
 
   * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0;
-    padding: clamp(1.5rem, 5vw, 3.5rem) 1rem 3rem;
-    background: hsl(var(--background));
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    background: hsl(var(--muted));
     color: hsl(var(--foreground));
     font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     font-size: 16px;
     line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-  main { max-width: 42rem; margin: 0 auto; }
 
-  .brand { display: flex; align-items: center; gap: .625rem; margin-bottom: 2rem; }
-  .mark { width: 2rem; height: 2rem; flex: none; }
-  .brand-name { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.01em; }
-  .brand-name span { color: hsl(var(--primary)); }
-
-  h1 { font-size: clamp(1.5rem, 4vw, 1.875rem); font-weight: 600; letter-spacing: -0.02em; margin: 0 0 .375rem; }
-  .sub { color: hsl(var(--muted-foreground)); font-size: .9375rem; margin: 0; }
-
-  /* ГЛАВНАЯ ПЛАШКА. Цвет — не единственный носитель смысла: рядом всегда стои́т слово
-     («работают» / «не отвечают»), иначе состояние теряется при дальтонизме и в ч/б печати. */
-  .verdict {
-    display: flex; align-items: center; gap: .875rem;
-    margin: 1.75rem 0;
-    padding: 1.125rem 1.25rem;
-    border: 1px solid hsl(var(--border));
-    border-radius: var(--radius);
-    background: hsl(var(--card));
+  /* ДЕКОР — как на 404: два размытых пятна бренда. Строго декоративен, вне потока, ничего не
+     перекрывает. Без отрицательного z-index: он клал бы слой ниже фона родителя, и пятна просто
+     не были бы видны — отказ идеально тихий (разметка на месте, страница пустая). Порядок задан
+     разметкой: декор первым, содержимое несёт свой слой. */
+  .decor { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+  .decor i {
+    position: absolute; display: block; border-radius: 50%; filter: blur(64px);
   }
-  .verdict.ok { border-color: hsl(var(--success) / .45); background: hsl(var(--success) / .07); }
-  .verdict.bad { border-color: hsl(var(--destructive) / .5); background: hsl(var(--destructive) / .07); }
-  .verdict-icon { flex: none; width: 1.5rem; height: 1.5rem; }
-  .verdict.ok .verdict-icon { color: hsl(var(--success)); }
-  .verdict.bad .verdict-icon { color: hsl(var(--destructive)); }
-  .verdict-text { font-weight: 600; font-size: 1.0625rem; }
-  .verdict-note { display: block; font-weight: 400; font-size: .875rem; color: hsl(var(--muted-foreground)); margin-top: .125rem; }
+  .decor i:first-child {
+    left: -10rem; top: -11rem; width: 40rem; height: 40rem;
+    background: radial-gradient(closest-side, hsl(var(--primary) / .28), transparent);
+  }
+  .decor i:last-child {
+    right: -8rem; bottom: -13rem; width: 36rem; height: 36rem;
+    background: radial-gradient(closest-side, hsl(var(--info) / .22), transparent);
+  }
 
-  .card { border: 1px solid hsl(var(--border)); border-radius: var(--radius); background: hsl(var(--card)); overflow: hidden; }
-  .card + .card { margin-top: 1.25rem; }
-  .card-title { font-size: .8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: .045em;
-                color: hsl(var(--muted-foreground)); padding: .875rem 1.25rem; border-bottom: 1px solid hsl(var(--border)); margin: 0; }
+  .wrap { position: relative; flex: 1; display: flex; flex-direction: column;
+          width: 100%; max-width: 44rem; margin: 0 auto; padding: 1.5rem 1rem 2rem; }
+
+  header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: clamp(2rem, 8vh, 4rem); }
+  .brand { display: flex; align-items: center; gap: .625rem; text-decoration: none; color: inherit; }
+  .mark { width: 1.875rem; height: 1.875rem; flex: none; }
+  .brand-name { font-size: 1.0625rem; font-weight: 600; letter-spacing: -.01em; }
+  .brand-name span { color: hsl(var(--primary)); }
+  /* Ссылка на сайт — единственное действие на странице, поэтому оформлена как кнопка-контур:
+     сплошная спорила бы за внимание с плашкой состояния, ради которой сюда пришли. */
+  .to-site {
+    display: inline-flex; align-items: center; min-height: 2.5rem; padding: 0 .875rem;
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+    background: hsl(var(--card)); color: hsl(var(--foreground));
+    font-size: .875rem; font-weight: 500; text-decoration: none;
+    transition: border-color .15s ease, color .15s ease;
+  }
+  .to-site:hover { border-color: hsl(var(--primary) / .6); color: hsl(var(--primary)); }
+
+  .hero { text-align: center; margin-bottom: 2.5rem; }
+  .hero-icon { width: 3rem; height: 3rem; margin: 0 auto .875rem; display: block; }
+  .hero.ok .hero-icon { color: hsl(var(--success)); }
+  .hero.bad .hero-icon { color: hsl(var(--destructive)); }
+  h1 { font-size: clamp(1.5rem, 5vw, 2rem); font-weight: 600; letter-spacing: -.025em; margin: 0 0 .5rem; }
+  .hero p { margin: 0; color: hsl(var(--muted-foreground)); font-size: .9375rem; }
+
+  .card { border: 1px solid hsl(var(--border)); border-radius: var(--radius);
+          background: hsl(var(--card)); overflow: hidden; }
+  .card + .card { margin-top: 1rem; }
+  .card-title { margin: 0; padding: .75rem 1.125rem; font-size: .75rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: .05em; color: hsl(var(--muted-foreground));
+                border-bottom: 1px solid hsl(var(--border)); }
 
   ul { list-style: none; margin: 0; padding: 0; }
-  .row { display: flex; align-items: center; gap: .75rem; padding: .875rem 1.25rem; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .875rem 1.125rem; }
   .row + .row { border-top: 1px solid hsl(var(--border)); }
-  .row-name { font-weight: 500; flex: 1; min-width: 0; }
+  .row-name { font-weight: 500; }
+  /* Цвет не единственный носитель смысла — рядом всегда слово. Иначе состояние теряется при
+     дальтонизме и в ч/б печати. */
   .row-state { display: inline-flex; align-items: center; gap: .5rem; font-size: .875rem; white-space: nowrap; }
   .row-state.is-up { color: hsl(var(--success)); }
   .row-state.is-down { color: hsl(var(--destructive)); }
-  .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
-  /* Табличные цифры: без них колонка миллисекунд дёргается при каждом обновлении. */
-  .row-meta { font-size: .8125rem; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums;
-              min-width: 4.5rem; text-align: right; }
+  .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; flex: none; }
 
-  .event { display: flex; gap: .875rem; padding: .75rem 1.25rem; font-size: .875rem; }
+  .event { display: flex; gap: .875rem; padding: .6875rem 1.125rem; font-size: .875rem; }
   .event + .event { border-top: 1px solid hsl(var(--border)); }
   .event-time { color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .event-empty { color: hsl(var(--muted-foreground)); }
 
-  footer { margin-top: 2rem; font-size: .8125rem; color: hsl(var(--muted-foreground)); }
-  footer a { color: hsl(var(--primary)); text-decoration: none; }
-  footer a:hover { text-decoration: underline; }
-  /* Видимая рамка фокуса — обязательна: страницей пользуются и с клавиатуры. */
-  a:focus-visible { outline: 2px solid hsl(var(--primary)); outline-offset: 2px; border-radius: .25rem; }
+
+  a:focus-visible, .to-site:focus-visible { outline: 2px solid hsl(var(--primary)); outline-offset: 2px; border-radius: .25rem; }
+
+  /* ВХОДНЫЕ АНИМАЦИИ — как на 404, и ТОЛЬКО входные: бесконечное движение на странице, куда
+     приходят из-за сбоя, раздражает. Под prefers-reduced-motion гасятся целиком, а не
+     «помедленнее»: правило требует убрать движение, а не смягчить. */
+  @media (prefers-reduced-motion: no-preference) {
+    .nf-in { opacity: 0; animation: nfIn .55s cubic-bezier(.16,1,.3,1) forwards; }
+    @keyframes nfIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  }
 
   @media (max-width: 30rem) {
-    .row { flex-wrap: wrap; gap: .375rem .75rem; }
-    .row-name { flex-basis: 100%; }
-    .row-meta { margin-left: auto; }
     .event { flex-direction: column; gap: .125rem; }
   }
 </style>
 </head>
 <body>
-<main>
-  <div class="brand">
-    
-<svg viewBox="0 0 566.91 510.23" class="mark" role="img" aria-label="DentBoard" fill="none">
-  <path d="M510.21,340.15A113.36,113.36,0,0,1,396.85,453.52H248.32a151,151,0,0,0,73.87-56.64h74.66a56.73,56.73,0,0,0,0-113.46H256.54A70.89,70.89,0,0,1,326,226.77H395.1l1,0h1.46a56.73,56.73,0,0,0-.73-113.45H322.18a151,151,0,0,0-73.92-56.65H396.85A113.37,113.37,0,0,1,471.8,255.11,113,113,0,0,1,510.21,340.15Z" fill="hsl(var(--primary))"/>
-  <path d="M283.4,196a85,85,0,0,0-85-82.58h-85V311.83a85,85,0,0,0,170,0l0,0V292h56.69v19.85A141,141,0,0,1,317.28,389l-2.09,3a143.37,143.37,0,0,1-69.7,53.45v0A141.85,141.85,0,0,1,56.69,311.81V56.69H198.42a141.56,141.56,0,0,1,47,8v0a143.34,143.34,0,0,1,69.75,53.46l2.15,3.11A141,141,0,0,1,340.13,196c0,.82,0,1.64,0,2.46v19.85H326a79,79,0,0,0-42.58,12.46Z" fill="hsl(var(--foreground))"/>
-  <path d="M315.18,118.17l2.15,3.11a142.09,142.09,0,0,0-71.89-56.61v0A143.34,143.34,0,0,1,315.18,118.17ZM245.49,445.5v0A142.16,142.16,0,0,0,317.28,389l-2.09,3A143.37,143.37,0,0,1,245.49,445.5Z" fill="hsl(var(--foreground))"/>
-</svg>
-    <span class="brand-name">Dent<span>Board</span></span>
+<div class="decor" aria-hidden="true"><i></i><i></i></div>
+
+<div class="wrap">
+  <header class="nf-in">
+    <a class="brand" href="https://dentboard.ru">
+      <svg viewBox="0 0 566.91 510.23" class="mark" role="img" aria-label="DentBoard" fill="none"><path d="M510.21,340.15A113.36,113.36,0,0,1,396.85,453.52H248.32a151,151,0,0,0,73.87-56.64h74.66a56.73,56.73,0,0,0,0-113.46H256.54A70.89,70.89,0,0,1,326,226.77H395.1l1,0h1.46a56.73,56.73,0,0,0-.73-113.45H322.18a151,151,0,0,0-73.92-56.65H396.85A113.37,113.37,0,0,1,471.8,255.11,113,113,0,0,1,510.21,340.15Z" fill="hsl(var(--primary))"/><path d="M283.4,196a85,85,0,0,0-85-82.58h-85V311.83a85,85,0,0,0,170,0l0,0V292h56.69v19.85A141,141,0,0,1,317.28,389l-2.09,3a143.37,143.37,0,0,1-69.7,53.45v0A141.85,141.85,0,0,1,56.69,311.81V56.69H198.42a141.56,141.56,0,0,1,47,8v0a143.34,143.34,0,0,1,69.75,53.46l2.15,3.11A141,141,0,0,1,340.13,196c0,.82,0,1.64,0,2.46v19.85H326a79,79,0,0,0-42.58,12.46Z" fill="hsl(var(--foreground))"/><path d="M315.18,118.17l2.15,3.11a142.09,142.09,0,0,0-71.89-56.61v0A143.34,143.34,0,0,1,315.18,118.17ZM245.49,445.5v0A142.16,142.16,0,0,0,317.28,389l-2.09,3A143.37,143.37,0,0,1,245.49,445.5Z" fill="hsl(var(--foreground))"/></svg>
+      <span class="brand-name">Dent<span>Board</span></span>
+    </a>
+    <a class="to-site" href="https://dentboard.ru">На сайт</a>
+  </header>
+
+  <div class="hero ok nf-in" style="animation-delay:60ms">
+    <span class="hero-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg></span>
+    <h1>Все сервисы работают</h1>
+    <p>Проверено 28.08.2026, 13:45</p>
   </div>
 
-  <h1>Состояние сервисов</h1>
-  <p class="sub">Проверка снаружи каждые 5 минут. Обновлено 28.08.2026, 13:45 (МСК).</p>
-
-  <div class="verdict ok">
-    <svg class="verdict-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
-    <span class="verdict-text">
-      Все сервисы работают
-      <span class="verdict-note">
-        Последняя проверка прошла без ошибок.
-      </span>
-    </span>
-  </div>
-
-  <section class="card">
-    <h2 class="card-title">Сервисы</h2>
+  <section class="card nf-in" style="animation-delay:100ms">
     <ul>
-        <li class="row">
+        <li class="row nf-in" style="animation-delay:120ms">
           <span class="row-name">Сайт</span>
           <span class="row-state is-up">
             <span class="dot" aria-hidden="true"></span>работает
           </span>
-          <span class="row-meta">516&nbsp;мс</span>
         </li>
-        <li class="row">
+        <li class="row nf-in" style="animation-delay:165ms">
           <span class="row-name">Кабинет лаборатории</span>
           <span class="row-state is-up">
             <span class="dot" aria-hidden="true"></span>работает
           </span>
-          <span class="row-meta">396&nbsp;мс</span>
         </li>
-        <li class="row">
+        <li class="row nf-in" style="animation-delay:210ms">
           <span class="row-name">Кабинет заказчика</span>
           <span class="row-state is-up">
             <span class="dot" aria-hidden="true"></span>работает
           </span>
-          <span class="row-meta">573&nbsp;мс</span>
         </li>
-        <li class="row">
+        <li class="row nf-in" style="animation-delay:255ms">
           <span class="row-name">API</span>
           <span class="row-state is-up">
             <span class="dot" aria-hidden="true"></span>работает
           </span>
-          <span class="row-meta">373&nbsp;мс</span>
         </li></ul>
   </section>
 
-  <section class="card">
-    <h2 class="card-title">История</h2>
-    <ul><li class="event event-empty">С момента запуска наблюдения ничего не падало.</li></ul>
-  </section>
-
-  <footer>
-    <p>
-      Время — это полный запрос из-за рубежа: дорога, шифрование и генерация страницы вместе.
-      Из России отклик заметно меньше.
-    </p>
-    <p>
-      Страница размещена вне серверов DentBoard, поэтому открывается и во время сбоя.
-      <a href="https://dentboard.ru">На сайт</a>
-    </p>
-  </footer>
-</main>
+</div>
 </body>
 </html>
