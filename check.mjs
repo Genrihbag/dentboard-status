@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 // Аватар канала — ОТДЕЛЬНЫМ файлом, и не ради порядка: гистерезис и свод состояния должны
 // проверяться образцами, без сети и без Telegram. Внутри этого файла они были бы непроверяемы,
 // потому что он с первой строки читает цели и ходит наружу.
-import { syncAvatar } from "./avatar.mjs";
+import { syncAvatar, stateOf } from "./avatar.mjs";
 
 const TIMEOUT_MS = 15_000;
 const HISTORY = "data/history.json";
@@ -106,7 +106,26 @@ for (const target of targets) {
   if (was === undefined) changed = true;
 }
 
-const history = { current: results, events: previous.events.slice(0, KEEP_EVENTS), updatedAt: now };
+/**
+ * 🔴 СВОД ПУБЛИКУЕТСЯ, А НЕ СЧИТАЕТСЯ ПОТРЕБИТЕЛЕМ. Точку состояния в шапке кабинетов рисует
+ * фронт DentBoard, забирая этот файл с `raw.githubusercontent.com`. Посчитай он «зелёный/жёлтый/
+ * красный» сам — правило существовало бы в двух экземплярах и разошлось бы молча: на странице
+ * жёлтый, в кабинете зелёный, и никто не знает, кто прав.
+ *
+ * Берётся ТА ЖЕ `stateOf`, что решает цвет аватара канала. Один master на сущность: смысл
+ * «что считать сбоем» живёт в одном месте с доводами (почему красная только когда лежит всё,
+ * почему медленный ответ приравнен к частичному отказу).
+ *
+ * ⚠️ БЕЗ ГИСТЕРЕЗИСА, в отличие от аватара. Там задержка в два прогона оправдана ценой: смена
+ * фото оставляет запись в ленте канала. Здесь цены нет — точка меняет цвет молча, и задерживать
+ * её значило бы показывать зелёное поверх уже известного отказа.
+ */
+const history = {
+  current: results,
+  overall: stateOf(results),
+  events: previous.events.slice(0, KEEP_EVENTS),
+  updatedAt: now,
+};
 mkdirSync("data", { recursive: true });
 writeFileSync(HISTORY, `${JSON.stringify(history, null, 2)}\n`);
 
