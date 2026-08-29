@@ -103,14 +103,39 @@ else
   echo "       переписать — «hostfile_replace_entries: Operation not permitted»."
 fi
 
-say "5. Таймер"
+say "5. Сайт состояния"
+SITE_DIR=${SITE_DIR:-/var/www/status}
+install -d -o "$USER_NAME" -g "$USER_NAME" "$SITE_DIR/data"
+install -d /var/www/certbot
+if command -v nginx > /dev/null 2>&1; then
+  ln -sf "$DIR/vps/status-site.conf" /etc/nginx/sites-available/dentboard-status.conf
+  echo "  конфиг положен в /etc/nginx/sites-available/dentboard-status.conf"
+  # ⚠️ САЙТ НЕ ВКЛЮЧАЕТСЯ АВТОМАТИЧЕСКИ. Без сертификата nginx не стартует, а рухнувший nginx унесёт
+  # с собой ВСЁ, что на этой машине им обслуживается, — мы это уже видели сегодня на чужом мёртвом
+  # апстриме. Включение делает человек, после certbot, и это осознанный порядок.
+  if [ -e /etc/nginx/sites-enabled/dentboard-status.conf ]; then
+    echo "  сайт уже включён"
+    nginx -t > /dev/null 2>&1 && systemctl reload nginx && echo "  nginx перечитан"
+  else
+    echo "  ⚠ САЙТ ЕЩЁ НЕ ВКЛЮЧЁН — сначала сертификат, иначе nginx не поднимется:"
+    echo "      certbot certonly --webroot -w /var/www/certbot -d status.dentboard.ru"
+    echo "      ln -s /etc/nginx/sites-available/dentboard-status.conf /etc/nginx/sites-enabled/"
+    echo "      nginx -t && systemctl reload nginx"
+    echo "    ⚠️ И ДО ЭТОГО: A-запись status.dentboard.ru должна указывать на ЭТУ машину,"
+    echo "       иначе certbot не подтвердит владение доменом."
+  fi
+else
+  echo "  ⚠ nginx не установлен — страница будет собираться в $SITE_DIR, но раздавать её некому"
+fi
+
+say "6. Таймер"
 ln -sf "$DIR/vps/dentboard-status.service" /etc/systemd/system/
 ln -sf "$DIR/vps/dentboard-status.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now dentboard-status.timer
 echo "  таймер включён"
 
-say "6. Приёмка — один круг ПРЯМО СЕЙЧАС"
+say "7. Приёмка — один круг ПРЯМО СЕЙЧАС"
 # ⚠️ УСТАНОВКА ЗАКАНЧИВАЕТСЯ ПРОВЕРКОЙ, А НЕ СООБЩЕНИЕМ «ГОТОВО». «Поставил» без прогона —
 # утверждение, а не факт: юнит может не найти node, не иметь прав на каталог, упереться в сеть, и
 # узнать об этом через час по молчащей странице — худший из возможных способов.

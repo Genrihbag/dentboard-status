@@ -19,6 +19,9 @@ WorkingDirectory=/opt/dentboard-status
 ExecStart=/bin/bash /opt/dentboard-status/tick.sh
 # Секреты — файлом, а не в юните: юнит лежит в git, файл нет.
 EnvironmentFile=/etc/dentboard-status.env
+# Куда класть готовую страницу. Задано — публикуем на свой nginx КАЖДЫЙ круг и в git не ходим:
+# запись на локальный диск ничего не стои́т, поэтому экономить нечего.
+Environment=SITE_DIR=/var/www/status
 User=status
 Group=status
 
