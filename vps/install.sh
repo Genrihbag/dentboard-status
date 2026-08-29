@@ -94,10 +94,13 @@ else
   echo "      sudo -u $USER_NAME ssh-keygen -t ed25519 -N '' -f /home/$USER_NAME/.ssh/id_ed25519"
   echo "      cat /home/$USER_NAME/.ssh/id_ed25519.pub"
   echo "    → GitHub → репозиторий → Settings → Deploy keys → Add key, галочка «Allow write access»"
-  echo "      sudo -u $USER_NAME ssh-keyscan -t ed25519 github.com >> /home/$USER_NAME/.ssh/known_hosts"
+  echo "      ssh-keyscan -t ed25519 github.com | sudo -u $USER_NAME tee -a /home/$USER_NAME/.ssh/known_hosts"
   echo "      sudo -u $USER_NAME git -C $DIR remote set-url origin git@github.com:Genrihbag/dentboard-status.git"
   echo "    ⚠️ Строка с ssh-keyscan обязательна: без неё первое соединение спросит «продолжить?»,"
   echo "       а спрашивать некого — таймер работает без человека, и push будет молча висеть."
+  echo "    ⚠️ И записывать её надо ЧЕРЕЗ tee, а не через '>>': перенаправление выполняет оболочка"
+  echo "       ROOT, поэтому файл достаётся root, и ssh от имени $USER_NAME потом не может его"
+  echo "       переписать — «hostfile_replace_entries: Operation not permitted»."
 fi
 
 say "5. Таймер"
