@@ -8,7 +8,15 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/dentboard-status
-ExecStart=/opt/dentboard-status/tick.sh
+# ⚠️ ЗОВЁМ ЧЕРЕЗ `bash`, А НЕ НАПРЯМУЮ — и это не перестраховка, а починка боевого отказа
+# 29.08.2026: `status=203/EXEC`, systemd не смог запустить файл. Бит исполнения не доехал до git
+# (`100644`), потому что `chmod +x` делался на Windows — команда отработала успешно и НЕ ПРОИЗВЕЛА
+# действия, видимого репозиторию. Классический случай: инструмент отчитался о выполнении, а не о
+# результате.
+#
+# Бит в индексе теперь выставлен, но вызов через `bash` снимает вопрос целиком: он переживёт и
+# потерянный бит, и файловую систему, смонтированную `noexec`.
+ExecStart=/bin/bash /opt/dentboard-status/tick.sh
 # Секреты — файлом, а не в юните: юнит лежит в git, файл нет.
 EnvironmentFile=/etc/dentboard-status.env
 User=status
