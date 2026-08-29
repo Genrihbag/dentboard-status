@@ -3,33 +3,33 @@
     "Сайт": {
       "ok": true,
       "status": 200,
-      "ms": 832,
-      "checkedAt": "2026-08-29T10:07:31.312Z",
+      "ms": 704,
+      "checkedAt": "2026-08-29T10:23:16.402Z",
       "url": "https://dentboard.ru"
     },
     "Кабинет лаборатории": {
       "ok": true,
       "status": 200,
-      "ms": 779,
-      "checkedAt": "2026-08-29T10:07:31.312Z",
+      "ms": 668,
+      "checkedAt": "2026-08-29T10:23:16.402Z",
       "url": "https://app.dentboard.ru"
     },
     "Кабинет заказчика": {
       "ok": true,
       "status": 200,
-      "ms": 691,
-      "checkedAt": "2026-08-29T10:07:31.312Z",
+      "ms": 661,
+      "checkedAt": "2026-08-29T10:23:16.402Z",
       "url": "https://portal.dentboard.ru"
     },
     "API": {
       "ok": true,
       "status": 200,
-      "ms": 669,
-      "checkedAt": "2026-08-29T10:07:31.312Z",
+      "ms": 644,
+      "checkedAt": "2026-08-29T10:23:16.402Z",
       "url": "https://api.dentboard.ru/api/v1/health"
     }
   },
   "overall": "up",
   "events": [],
-  "updatedAt": "2026-08-29T10:07:31.312Z"
+  "updatedAt": "2026-08-29T10:23:16.402Z"
 }
