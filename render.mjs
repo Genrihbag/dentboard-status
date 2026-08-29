@@ -37,11 +37,11 @@ const BAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const rows = services
   .map(
     ([name, r], i) => `
-        <li class="row nf-in" style="animation-delay:${120 + i * 45}ms">
+        <li class="row nf-in" style="animation-delay:${120 + i * 45}ms" data-target="${esc(name)}">
           <span class="row-name">${esc(name)}</span>
           <span class="row-state ${r.ok ? "is-up" : "is-down"}">
-            ${r.ok && typeof r.ms === "number" ? `<span class="row-ms">${r.ms} мс</span>` : ""}
-            <span class="dot" aria-hidden="true"></span>${r.ok ? "работает" : "не отвечает"}
+            <span class="row-ms">${r.ok && typeof r.ms === "number" ? `${r.ms} мс` : ""}</span>
+            <span class="dot" aria-hidden="true"></span><span class="row-word">${r.ok ? "работает" : "не отвечает"}</span>
           </span>
         </li>`,
   )
@@ -79,9 +79,13 @@ writeFileSync(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="120">
+<!-- ⚠️ ПЕРЕЗАГРУЗКА — ЗАПАСНОЙ ПУТЬ, А НЕ ОСНОВНОЙ. Числа обновляет скрипт внизу, каждые 30 с и
+     БЕЗ перезагрузки: страницу открывают в минуту аварии, и мигание всей вёрстки в этот момент
+     читается как «оно ещё и падает». Пять минут здесь — на случай выключенного JS: реже, чем
+     раньше, потому что теперь это страховка, а не механизм. -->
+<meta http-equiv="refresh" content="300">
 <meta name="robots" content="noindex, follow">
-<meta name="description" content="Состояние сервисов DentBoard. Проверка снаружи каждые 5 минут.">
+<meta name="description" content="Состояние сервисов DentBoard. Проверка снаружи каждую минуту.">
 <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f1f5f9" media="(prefers-color-scheme: light)">
 <title>${allOk ? "Все сервисы работают" : "Есть недоступные сервисы"} — DentBoard</title>
@@ -252,7 +256,7 @@ writeFileSync(
   <div class="hero ${allOk ? "ok" : "bad"} nf-in" style="animation-delay:60ms">
     <span class="hero-icon">${allOk ? OK_ICON : BAD_ICON}</span>
     <h1>${allOk ? "Все сервисы работают" : "Есть недоступные сервисы"}</h1>
-    <p>${
+    <p data-checked>${
       allOk
         ? `Проверено ${when(h.updatedAt)}`
         : `Мы знаем о сбое и уже занимаемся им. Проверено ${when(h.updatedAt)}`
@@ -264,6 +268,66 @@ writeFileSync(
   </section>
 ${historyBlock}
 </div>
+<script>
+/**
+ * ЖИВОЕ ОБНОВЛЕНИЕ ЧИСЕЛ — без перезагрузки страницы.
+ *
+ * 🔴 ЗАЧЕМ. Наблюдатель пишет результат КАЖДУЮ МИНУТУ, а страница обновлялась перезагрузкой раз в
+ * две — то есть человек видел числа старше данных вдвое и справедливо считал, что «пинги не
+ * обновляются». Владелец заметил это 29.08.2026 в первый же день после переезда.
+ *
+ * ⚠️ ОБНОВЛЯЕМ ЗНАЧЕНИЯ, А НЕ ПЕРЕРИСОВЫВАЕМ РАЗМЕТКУ. Строки ищутся по «data-target» — имени
+ * цели, — поэтому порядок и оформление остаются делом сервера, а скрипт трогает ровно три вещи:
+ * время ответа, слово, подпись о замере. Перерисуй он вёрстку, любая правка дизайна ломала бы
+ * скрипт молча.
+ *
+ * ⚠️ ОТКАЗ ЗАПРОСА НИЧЕГО НЕ МЕНЯЕТ. Не сумев спросить, мы НЕ знаем состояния — и показывать в
+ * этот момент «всё упало» значило бы врать о наблюдаемом из-за собственной сетевой заминки.
+ * Останется прежнее значение, а через пять минут страница перезагрузится сама.
+ */
+(function () {
+  var EVERY = 30000;
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function when(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear() +
+      ", " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+  function apply(h) {
+    var rows = document.querySelectorAll("[data-target]");
+    for (var i = 0; i < rows.length; i++) {
+      var li = rows[i];
+      var r = (h.current || {})[li.getAttribute("data-target")];
+      if (!r) continue;
+      var state = li.querySelector(".row-state");
+      var ms = li.querySelector(".row-ms");
+      var word = li.querySelector(".row-word");
+      if (state) state.className = "row-state " + (r.ok ? "is-up" : "is-down");
+      // Время показываем ТОЛЬКО у ответившей цели: у не ответившей это длительность ожидания до
+      // отказа — другая величина под тем же именем.
+      if (ms) ms.textContent = r.ok && typeof r.ms === "number" ? r.ms + " мс" : "";
+      if (word) word.textContent = r.ok ? "работает" : "не отвечает";
+    }
+    var p = document.querySelector("[data-checked]");
+    var stamp = when(h.updatedAt);
+    if (p && stamp) {
+      var down = Object.keys(h.current || {}).filter(function (k) { return !h.current[k].ok; });
+      p.textContent = down.length === 0
+        ? "Проверено " + stamp
+        : "Мы знаем о сбое и уже занимаемся им. Проверено " + stamp;
+    }
+  }
+  function tick() {
+    fetch("data/history.json", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (h) { if (h) apply(h); })
+      .catch(function () { /* см. оговорку выше: молчим и оставляем прежнее */ });
+  }
+  setInterval(tick, EVERY);
+  tick();
+})();
+</script>
 </body>
 </html>
 `,

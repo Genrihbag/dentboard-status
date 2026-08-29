@@ -3,9 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="120">
+<!-- ⚠️ ПЕРЕЗАГРУЗКА — ЗАПАСНОЙ ПУТЬ, А НЕ ОСНОВНОЙ. Числа обновляет скрипт внизу, каждые 30 с и
+     БЕЗ перезагрузки: страницу открывают в минуту аварии, и мигание всей вёрстки в этот момент
+     читается как «оно ещё и падает». Пять минут здесь — на случай выключенного JS: реже, чем
+     раньше, потому что теперь это страховка, а не механизм. -->
+<meta http-equiv="refresh" content="300">
 <meta name="robots" content="noindex, follow">
-<meta name="description" content="Состояние сервисов DentBoard. Проверка снаружи каждые 5 минут.">
+<meta name="description" content="Состояние сервисов DentBoard. Проверка снаружи каждую минуту.">
 <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f1f5f9" media="(prefers-color-scheme: light)">
 <title>Все сервисы работают — DentBoard</title>
@@ -176,41 +180,101 @@
   <div class="hero ok nf-in" style="animation-delay:60ms">
     <span class="hero-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg></span>
     <h1>Все сервисы работают</h1>
-    <p>Проверено 29.08.2026, 17:07</p>
+    <p data-checked>Проверено 29.08.2026, 17:07</p>
   </div>
 
   <section class="card nf-in" style="animation-delay:100ms">
     <ul>
-        <li class="row nf-in" style="animation-delay:120ms">
+        <li class="row nf-in" style="animation-delay:120ms" data-target="Сайт">
           <span class="row-name">Сайт</span>
           <span class="row-state is-up">
             <span class="row-ms">387 мс</span>
-            <span class="dot" aria-hidden="true"></span>работает
+            <span class="dot" aria-hidden="true"></span><span class="row-word">работает</span>
           </span>
         </li>
-        <li class="row nf-in" style="animation-delay:165ms">
+        <li class="row nf-in" style="animation-delay:165ms" data-target="Кабинет лаборатории">
           <span class="row-name">Кабинет лаборатории</span>
           <span class="row-state is-up">
             <span class="row-ms">205 мс</span>
-            <span class="dot" aria-hidden="true"></span>работает
+            <span class="dot" aria-hidden="true"></span><span class="row-word">работает</span>
           </span>
         </li>
-        <li class="row nf-in" style="animation-delay:210ms">
+        <li class="row nf-in" style="animation-delay:210ms" data-target="Кабинет заказчика">
           <span class="row-name">Кабинет заказчика</span>
           <span class="row-state is-up">
             <span class="row-ms">173 мс</span>
-            <span class="dot" aria-hidden="true"></span>работает
+            <span class="dot" aria-hidden="true"></span><span class="row-word">работает</span>
           </span>
         </li>
-        <li class="row nf-in" style="animation-delay:255ms">
+        <li class="row nf-in" style="animation-delay:255ms" data-target="API">
           <span class="row-name">API</span>
           <span class="row-state is-up">
             <span class="row-ms">195 мс</span>
-            <span class="dot" aria-hidden="true"></span>работает
+            <span class="dot" aria-hidden="true"></span><span class="row-word">работает</span>
           </span>
         </li></ul>
   </section>
 
 </div>
+<script>
+/**
+ * ЖИВОЕ ОБНОВЛЕНИЕ ЧИСЕЛ — без перезагрузки страницы.
+ *
+ * 🔴 ЗАЧЕМ. Наблюдатель пишет результат КАЖДУЮ МИНУТУ, а страница обновлялась перезагрузкой раз в
+ * две — то есть человек видел числа старше данных вдвое и справедливо считал, что «пинги не
+ * обновляются». Владелец заметил это 29.08.2026 в первый же день после переезда.
+ *
+ * ⚠️ ОБНОВЛЯЕМ ЗНАЧЕНИЯ, А НЕ ПЕРЕРИСОВЫВАЕМ РАЗМЕТКУ. Строки ищутся по «data-target» — имени
+ * цели, — поэтому порядок и оформление остаются делом сервера, а скрипт трогает ровно три вещи:
+ * время ответа, слово, подпись о замере. Перерисуй он вёрстку, любая правка дизайна ломала бы
+ * скрипт молча.
+ *
+ * ⚠️ ОТКАЗ ЗАПРОСА НИЧЕГО НЕ МЕНЯЕТ. Не сумев спросить, мы НЕ знаем состояния — и показывать в
+ * этот момент «всё упало» значило бы врать о наблюдаемом из-за собственной сетевой заминки.
+ * Останется прежнее значение, а через пять минут страница перезагрузится сама.
+ */
+(function () {
+  var EVERY = 30000;
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function when(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear() +
+      ", " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+  function apply(h) {
+    var rows = document.querySelectorAll("[data-target]");
+    for (var i = 0; i < rows.length; i++) {
+      var li = rows[i];
+      var r = (h.current || {})[li.getAttribute("data-target")];
+      if (!r) continue;
+      var state = li.querySelector(".row-state");
+      var ms = li.querySelector(".row-ms");
+      var word = li.querySelector(".row-word");
+      if (state) state.className = "row-state " + (r.ok ? "is-up" : "is-down");
+      // Время показываем ТОЛЬКО у ответившей цели: у не ответившей это длительность ожидания до
+      // отказа — другая величина под тем же именем.
+      if (ms) ms.textContent = r.ok && typeof r.ms === "number" ? r.ms + " мс" : "";
+      if (word) word.textContent = r.ok ? "работает" : "не отвечает";
+    }
+    var p = document.querySelector("[data-checked]");
+    var stamp = when(h.updatedAt);
+    if (p && stamp) {
+      var down = Object.keys(h.current || {}).filter(function (k) { return !h.current[k].ok; });
+      p.textContent = down.length === 0
+        ? "Проверено " + stamp
+        : "Мы знаем о сбое и уже занимаемся им. Проверено " + stamp;
+    }
+  }
+  function tick() {
+    fetch("data/history.json", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (h) { if (h) apply(h); })
+      .catch(function () { /* см. оговорку выше: молчим и оставляем прежнее */ });
+  }
+  setInterval(tick, EVERY);
+  tick();
+})();
+</script>
 </body>
 </html>
