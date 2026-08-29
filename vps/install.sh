@@ -145,8 +145,18 @@ SITE_DIR=${SITE_DIR:-/var/www/status}
 install -d "$SITE_DIR/data" /var/www/certbot
 chown -R "$USER_NAME:$USER_NAME" "$SITE_DIR"
 if command -v nginx > /dev/null 2>&1; then
+  ln -sf "$DIR/vps/status-site-http.conf" /etc/nginx/sites-available/dentboard-status-http.conf
   ln -sf "$DIR/vps/status-site.conf" /etc/nginx/sites-available/dentboard-status.conf
-  echo "  конфиг положен в /etc/nginx/sites-available/dentboard-status.conf"
+  # ⚠️ ПОЛОВИНА НА 80-м ПОРТУ ВКЛЮЧАЕТСЯ СРАЗУ: она не требует сертификата и нужна, чтобы его
+  # получить. Половина с TLS — только после certbot, иначе nginx не стартует и унесёт с собой всё
+  # остальное на этой машине.
+  ln -sf /etc/nginx/sites-available/dentboard-status-http.conf /etc/nginx/sites-enabled/ 2> /dev/null || true
+  if nginx -t > /dev/null 2>&1; then
+    systemctl reload nginx
+    echo "  половина на 80-м порту включена (нужна для проверки владения доменом)"
+  else
+    echo "  ⚠ nginx не принял конфигурацию — смотрите nginx -t"
+  fi
   # ⚠️ САЙТ НЕ ВКЛЮЧАЕТСЯ АВТОМАТИЧЕСКИ. Без сертификата nginx не стартует, а рухнувший nginx унесёт
   # с собой ВСЁ, что на этой машине им обслуживается, — мы это уже видели сегодня на чужом мёртвом
   # апстриме. Включение делает человек, после certbot, и это осознанный порядок.
