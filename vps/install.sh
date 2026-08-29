@@ -45,11 +45,26 @@ say "2. Пользователь и каталог"
 id -u "$USER_NAME" > /dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$USER_NAME"
 if [ -d "$DIR/.git" ]; then
   echo "  репозиторий уже есть, обновляю"
+  # ⚠️ СНАЧАЛА ВЕРНУТЬСЯ НА ВЕТКУ, ПОТОМ ОБНОВЛЯТЬСЯ. `reset --hard` не возвращает на ветку, а
+  # незавершённый `rebase` оставляет дерево вне её — и `git pull` дальше отказывает: «You are not
+  # currently on a branch». Установщик — это то место, куда человек приходит, КОГДА УЖЕ СЛОМАНО,
+  # поэтому он обязан уметь выкарабкиваться, а не требовать целого дерева на входе.
+  if ! sudo -u "$USER_NAME" git -C "$DIR" symbolic-ref -q HEAD > /dev/null; then
+    echo "  дерево вне ветки — возвращаю на main"
+    sudo -u "$USER_NAME" git -C "$DIR" rebase --abort 2> /dev/null || true
+    sudo -u "$USER_NAME" git -C "$DIR" checkout -q -f main
+  fi
   # ⚠️ ОБНОВЛЯЕМ ОТ ИМЕНИ ВЛАДЕЛЬЦА, А НЕ ОТ ROOT — починка дефекта, найденного боевой установкой
   # 29.08.2026. Первый прогон делает `chown` на `status`, второй звал `git pull` от root, и git
   # отвечал «detected dubious ownership», отказываясь работать в чужом каталоге. То есть установщик
   # ломал сам себя ровно на втором запуске — на обновлении, ради которого его и запускают повторно.
-  sudo -u "$USER_NAME" git -C "$DIR" pull -q --rebase
+  # `--autostash` — дерево на боевой машине может быть тронуто чем угодно, и обновление не должно
+  # ломаться от одного постороннего файла.
+  sudo -u "$USER_NAME" git -C "$DIR" pull -q --rebase --autostash || {
+    echo "  обновиться не удалось — привожу к удалённому состоянию"
+    sudo -u "$USER_NAME" git -C "$DIR" fetch -q origin
+    sudo -u "$USER_NAME" git -C "$DIR" reset -q --hard origin/main
+  }
 else
   git clone -q "$REPO" "$DIR"
   chown -R "$USER_NAME:$USER_NAME" "$DIR"
