@@ -48,6 +48,20 @@ publish_local() {
     return 1
   fi
   install -d "$SITE_DIR/data"
+
+  # 🔴 ЗНАЧКИ КОПИРУЮТСЯ ТОЖЕ — потеряны при переезде и найдены владельцем 29.08.2026: «у status
+  # теперь нет иконки в браузере». Прежняя публикация в `gh-pages` забирала их вместе со страницей,
+  # а новая копировала только `index.html` и данные — то есть переписанный механизм молча делал
+  # МЕНЬШЕ прежнего, и заметно это было лишь глазами, в отдельной вкладке.
+  #
+  # ⚠️ ВКЛАДКА БЕЗ ЗНАЧКА ЧИТАЕТСЯ КАК ЧУЖАЯ СТРАНИЦА, а сюда приходят ровно тогда, когда сомневаются,
+  # туда ли попали, — в минуту аварии. Это не украшение.
+  #
+  # Копируем ТОЛЬКО отсутствующее: файлы неизменны, и переписывать их каждую минуту незачем.
+  for asset in favicon.ico icon.svg apple-icon.png; do
+    [ -f "$SITE_DIR/$asset" ] || install -m 0644 "$asset" "$SITE_DIR/$asset" 2> /dev/null || true
+  done
+
   install -m 0644 index.html "$SITE_DIR/.index.html.new"
   mv -f "$SITE_DIR/.index.html.new" "$SITE_DIR/index.html"
   install -m 0644 data/history.json "$SITE_DIR/data/.history.json.new"
