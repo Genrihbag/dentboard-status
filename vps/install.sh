@@ -45,11 +45,18 @@ say "2. Пользователь и каталог"
 id -u "$USER_NAME" > /dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$USER_NAME"
 if [ -d "$DIR/.git" ]; then
   echo "  репозиторий уже есть, обновляю"
-  git -C "$DIR" pull -q --rebase
+  # ⚠️ ОБНОВЛЯЕМ ОТ ИМЕНИ ВЛАДЕЛЬЦА, А НЕ ОТ ROOT — починка дефекта, найденного боевой установкой
+  # 29.08.2026. Первый прогон делает `chown` на `status`, второй звал `git pull` от root, и git
+  # отвечал «detected dubious ownership», отказываясь работать в чужом каталоге. То есть установщик
+  # ломал сам себя ровно на втором запуске — на обновлении, ради которого его и запускают повторно.
+  sudo -u "$USER_NAME" git -C "$DIR" pull -q --rebase
 else
   git clone -q "$REPO" "$DIR"
+  chown -R "$USER_NAME:$USER_NAME" "$DIR"
 fi
 chown -R "$USER_NAME:$USER_NAME" "$DIR"
+# Чтобы `git` из-под root в этом каталоге тоже работал — руками туда заходят именно так.
+git config --global --add safe.directory "$DIR" 2> /dev/null || true
 echo "  $DIR готов"
 
 say "3. Секреты"
