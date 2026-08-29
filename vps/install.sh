@@ -120,8 +120,13 @@ fi
 
 say "5. Сайт состояния"
 SITE_DIR=${SITE_DIR:-/var/www/status}
-install -d -o "$USER_NAME" -g "$USER_NAME" "$SITE_DIR/data"
-install -d /var/www/certbot
+# ⚠️ ВЛАДЕЛЕЦ СТАВИТСЯ ЯВНО И НА ВЕСЬ КАТАЛОГ. `install -d -o … a/b` не гарантирует владельца
+# ПРОМЕЖУТОЧНЫМ каталогам, а если каталог уже существовал — не трогает его вовсе. Итог был виден
+# на боевой установке 29.08.2026: `/var/www/status` принадлежал root, и круг падал на
+# «install: cannot create regular file … Permission denied» — проверка при этом шла, страница не
+# обновлялась, и по журналу это выглядело как мелкое предупреждение.
+install -d "$SITE_DIR/data" /var/www/certbot
+chown -R "$USER_NAME:$USER_NAME" "$SITE_DIR"
 if command -v nginx > /dev/null 2>&1; then
   ln -sf "$DIR/vps/status-site.conf" /etc/nginx/sites-available/dentboard-status.conf
   echo "  конфиг положен в /etc/nginx/sites-available/dentboard-status.conf"
