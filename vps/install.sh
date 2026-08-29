@@ -79,15 +79,25 @@ fi
 say "4. Доступ на запись в репозиторий"
 # Наблюдатель пушит историю и страницу. Без ключа он будет работать и слать в Telegram, но страница
 # замрёт — и это состояние обязано быть НАЗВАНО, а не обнаружено через неделю по старой подписи.
-if sudo -u "$USER_NAME" git -C "$DIR" ls-remote --exit-code origin > /dev/null 2>&1; then
-  echo "  доступ к origin есть"
+# 🔴 ПРОВЕРЯЕМ ЗАПИСЬ, А НЕ ЧТЕНИЕ — починка ложного «доступ есть» 29.08.2026. Первая редакция
+# звала `git ls-remote`, но репозиторий ПУБЛИЧНЫЙ: читать его может кто угодно анонимно, и проверка
+# отвечала «доступ к origin есть» ровно там, где записи не было ни на грамм. Выяснилось это на
+# первом же круге — `could not read Username for https://github.com`.
+#
+# `push --dry-run` спрашивает то же самое, что делает наблюдатель, и ничего при этом не меняет:
+# проверка совпадает с проверяемым действием, а не похожа на него.
+if sudo -u "$USER_NAME" git -C "$DIR" push --dry-run -q origin HEAD:main > /dev/null 2>&1; then
+  echo "  запись в origin работает"
 else
-  echo "  ⚠ ДОСТУПА НА ЗАПИСЬ НЕТ. Проверка и Telegram будут работать, страница — нет."
-  echo "    Заведите ключ развёртывания с правом записи:"
+  echo "  ⚠ ЗАПИСИ В РЕПОЗИТОРИЙ НЕТ. Проверка и Telegram будут работать, страница — ЗАМРЁТ."
+  echo "    Четыре команды (третья — на сайте GitHub):"
   echo "      sudo -u $USER_NAME ssh-keygen -t ed25519 -N '' -f /home/$USER_NAME/.ssh/id_ed25519"
   echo "      cat /home/$USER_NAME/.ssh/id_ed25519.pub"
-  echo "    → GitHub → репозиторий → Settings → Deploy keys → Add key, «Allow write access»"
+  echo "    → GitHub → репозиторий → Settings → Deploy keys → Add key, галочка «Allow write access»"
+  echo "      sudo -u $USER_NAME ssh-keyscan -t ed25519 github.com >> /home/$USER_NAME/.ssh/known_hosts"
   echo "      sudo -u $USER_NAME git -C $DIR remote set-url origin git@github.com:Genrihbag/dentboard-status.git"
+  echo "    ⚠️ Строка с ssh-keyscan обязательна: без неё первое соединение спросит «продолжить?»,"
+  echo "       а спрашивать некого — таймер работает без человека, и push будет молча висеть."
 fi
 
 say "5. Таймер"
