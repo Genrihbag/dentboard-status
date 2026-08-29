@@ -126,6 +126,12 @@ fi
 say "Готово. Что смотреть дальше"
 cat <<'TAIL'
   systemctl list-timers dentboard-status.timer     — когда следующий круг
+  bash vps/probe-now.sh                            — круг прямо сейчас, с секретами
+  TEST_MESSAGE=true bash vps/probe-now.sh          — плюс проверочное сообщение в канал
+
+  ⚠️ Ручной запуск ТОЛЬКО так. `bash tick.sh` напрямую не видит /etc/dentboard-status.env —
+     его подключает systemd, а не оболочка, — и честно скажет «телеграм не настроен» при
+     совершенно исправной настройке.
   journalctl -u dentboard-status.service -f        — что видит наблюдатель
   https://status.dentboard.ru                      — что видят люди
 
