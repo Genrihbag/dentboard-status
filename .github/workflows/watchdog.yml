@@ -1,0 +1,38 @@
+name: Сторож наблюдателя
+
+# 🔴 ЭТО НЕ ПРОВЕРКА СЕРВИСОВ. Сервисы проверяет отдельная машина раз в минуту честным таймером
+# systemd; здесь GitHub отвечает на другой вопрос — ЖИВ ЛИ САМ НАБЛЮДАТЕЛЬ.
+#
+# Пока проверку гоняли машины GitHub, за её живость отвечал GitHub. Перенеся наблюдение к себе, мы
+# получили вопрос, которого раньше не было: кто заметит, что наблюдатель замолчал. Упавший таймер,
+# кончившийся диск, снесённый юнит выглядят одинаково — то есть никак.
+#
+# ⚠️ ЗДЕСЬ НЕНАДЁЖНОСТЬ РАСПИСАНИЯ ДОПУСТИМА, В ОТЛИЧИЕ ОТ САМОЙ ПРОВЕРКИ. Замерено 29.08.2026:
+# `*/5` даёт около одного прогона в час. Для «проверить сервис» это негодно, для «заметить, что
+# монитор молчит уже сорок минут» — вполне: тревога опоздает на десятки минут, а не на сутки.
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: status-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Жив ли наблюдатель
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node watchdog.mjs

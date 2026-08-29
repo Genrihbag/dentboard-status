@@ -1,0 +1,21 @@
+[Unit]
+Description=DentBoard: проверка доступности (один круг)
+Documentation=file:/opt/dentboard-status/vps/README.md
+# Сеть нужна — она и есть предмет проверки. Без неё круг честно провалится, но провалится ЗРЯ.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dentboard-status
+ExecStart=/opt/dentboard-status/tick.sh
+# Секреты — файлом, а не в юните: юнит лежит в git, файл нет.
+EnvironmentFile=/etc/dentboard-status.env
+User=status
+Group=status
+
+# ⚠️ ТАЙМАУТ КОРОЧЕ ИНТЕРВАЛА ТИКА. Круг с четырьмя целями по три попытки и таймаутом 15 с может
+# в худшем случае занять три минуты; зависший круг наложился бы на следующий, и два процесса
+# начали бы толкаться в одном git-репозитории. Пятидесяти секунд хватает на здоровый круг, а
+# больной обязан быть убит, а не растянут.
+TimeoutStartSec=50
