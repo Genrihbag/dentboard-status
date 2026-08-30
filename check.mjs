@@ -20,6 +20,9 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 // проверяться образцами, без сети и без Telegram. Внутри этого файла они были бы непроверяемы,
 // потому что он с первой строки читает цели и ходит наружу.
 import { syncAvatar, stateOf } from "./avatar.mjs";
+// Табло — тоже отдельным файлом и по той же причине: расписание правок и текст обязаны
+// проверяться образцами, без сети и без Telegram.
+import { syncBoard, loadBoard } from "./board.mjs";
 
 const TIMEOUT_MS = 15_000;
 const HISTORY = "data/history.json";
@@ -228,8 +231,22 @@ if (rose.length > 0) {
  * Слив их в одно значение означал бы коммит «сменилось состояние» там, где сменилась только
  * подтверждённость гистерезиса.
  */
-const avatar = await syncAvatar(results);
+const avatar = await syncAvatar(results, { protectedIds: [loadBoard().messageId] });
 console.log(`аватар: наблюдаем «${avatar.observed}», на канале «${avatar.state ?? "—"}»${avatar.changed ? " (сменили)" : ""}`);
+
+/**
+ * ТАБЛО — ПОСЛЕДНИМ, и порядок здесь такой же содержательный, как у аватара.
+ *
+ * История уже записана, сообщения о сбое уже ушли: витрина не имеет права утащить за собой ни то,
+ * ни другое. Отсюда же и то, что `syncBoard` никогда не бросает — отказ Telegram на правке
+ * закреплённого сообщения обязан остаться косметикой.
+ *
+ * ⚠️ НОМЕР ТАБЛА ПЕРЕДАЁТСЯ АВАТАРУ ВЫШЕ (`protectedIds`). Уборка служебного поста удаляет
+ * сообщение с номером `id - 1` вслепую, и с появлением табла этим соседом может оказаться оно
+ * само. Довод целиком — в `avatar.mjs`.
+ */
+const board = await syncBoard(results, stamp, STATUS_PAGE, { changed });
+console.log(`табло: ${board.mode}${board.messageId ? ` (№${board.messageId})` : ""} — ${board.why}`);
 
 /* Признак «коммитить ли» отдаётся оболочке ЯВНО, а не выводится ею из текста вывода: разбор
    чужого текста — способ получить тихое расхождение при первой же правке формулировки. */

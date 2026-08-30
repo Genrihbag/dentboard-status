@@ -191,7 +191,7 @@ export function saveState(state) {
  * причём с заново измеренным состоянием. Цикл ретраев внутри означал бы, что мы держим задание
  * GitHub и упорно ставим картинку, про которую уже, возможно, неправда.
  */
-export async function setChatPhoto(state) {
+export async function setChatPhoto(state, protectedIds = []) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
@@ -213,7 +213,7 @@ export async function setChatPhoto(state) {
   const payload = await res.json().catch(() => ({}));
   if (payload.ok) {
     console.log(`[аватар] поставлен кадр «${state}» (${path})`);
-    await sweepServiceMessage(token, chat);
+    await sweepServiceMessage(token, chat, protectedIds);
     return true;
   }
   // Причина печатается СЛОВАМИ Telegram: «бот не админ» и «нет права менять профиль» лечатся
@@ -240,10 +240,17 @@ export async function setChatPhoto(state) {
  * Если появятся, эту уборку надо будет снять, а не «улучшить»: угадывание чужого id безопаснее не
  * становится.
  *
+ * 🔴 `protectedIds` ЗАВЕДЁН 30.08.2026 ВМЕСТЕ С ТАБЛО — И ЭТО НЕ ПЕРЕСТРАХОВКА. С появлением
+ * закреплённого табла «в канал пишет только бот» перестало означать «между служебным сообщением и
+ * нашим щупом ничего нет»: пишет тот же бот, и его пост может оказаться ровно тем `id - 1`,
+ * который уборка сносит вслепую. Тогда механизм удалял бы собственное табло, следующий круг
+ * заводил бы новое, и канал наполнялся бы табличками — причём каждая отдельная итерация выглядела
+ * бы исправной работой.
+ *
  * НИКОГДА НЕ БРОСАЕТ и не влияет на исход смены аватара: ава уже поставлена, и неудача уборки —
  * косметика, которая не имеет права утащить за собой запись состояния.
  */
-async function sweepServiceMessage(token, chat) {
+async function sweepServiceMessage(token, chat, protectedIds = []) {
   try {
     const probe = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
@@ -267,6 +274,13 @@ async function sweepServiceMessage(token, chat) {
       return Boolean(d.ok);
     };
     const mine = await drop(id);
+    // Защищённый номер НЕ трогаем и говорим об этом: молчаливый пропуск читался бы как «служебное
+    // сообщение убрано», а оно осталось — это разные состояния канала.
+    const guarded = protectedIds.filter((x) => Number.isInteger(x)).includes(id - 1);
+    if (guarded) {
+      console.log(`[аватар] уборка ленты: №${id - 1} — это табло, не трогаю (служебный пост остался)`);
+      return;
+    }
     const service = await drop(id - 1);
     // Печатается ИСХОД КАЖДОГО удаления: «убрано» и «не смогли» иначе выглядят одинаково — тишиной,
     // а не смогли мы, скорее всего, из-за отсутствия права удалять сообщения у бота.
@@ -287,7 +301,7 @@ async function sweepServiceMessage(token, chat) {
  * прогон не повторил бы попытку: ава осталась бы прежней НАВСЕГДА, а файл утверждал бы обратное.
  * Счётчик подтверждений при этом сохраняется всегда — он про наблюдение, а не про отправку.
  */
-export async function syncAvatar(results) {
+export async function syncAvatar(results, { protectedIds = [] } = {}) {
   const observed = stateOf(results);
   const prev = loadState();
   const d = decide(prev, observed);
@@ -301,7 +315,7 @@ export async function syncAvatar(results) {
     return { changed: false, state: prev.applied ?? null, observed, persisted };
   }
 
-  const ok = await setChatPhoto(d.next);
+  const ok = await setChatPhoto(d.next, protectedIds);
   const persisted = ok
     ? saveState({ applied: d.next, pending: null, streak: 0 })
     : saveState({ applied: prev.applied ?? null, pending: observed, streak: CONFIRMATIONS });
