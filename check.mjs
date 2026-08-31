@@ -24,8 +24,20 @@ import { syncAvatar, stateOf } from "./avatar.mjs";
 // проверяться образцами, без сети и без Telegram.
 import { syncBoard, loadBoard } from "./board.mjs";
 
+// Накопление времён ответа — отдельным файлом по той же причине: разбор и перцентили обязаны
+// проверяться образцами, а этот файл с первой строки ходит наружу.
+import { appendSample, summarise } from "./latency.mjs";
+
 const TIMEOUT_MS = 15_000;
 const HISTORY = "data/history.json";
+/**
+ * Сырые замеры — ОТДЕЛЬНЫМ файлом и НЕ публикуются.
+ *
+ * `history.json` браузеры тянут каждые 30 секунд (страница состояния и точка в шапке кабинетов);
+ * 2880 чисел на цель означали бы платить этим трафиком за данные, которые нужны раз в месяц.
+ * Наружу идёт только СВОД (`p50`/`p95`/`max`/`n` — четыре числа на цель).
+ */
+const LATENCY = "data/latency.json";
 /** Сколько событий храним. Не «всю историю»: файл читается целиком при каждом запуске. */
 const KEEP_EVENTS = 500;
 
@@ -98,9 +110,25 @@ let changed = false;
 const fell = [];
 const rose = [];
 
+let latency = existsSync(LATENCY) ? JSON.parse(readFileSync(LATENCY, "utf8")) : {};
+
 for (const target of targets) {
   const r = await probe(target);
-  results[target.name] = { ok: r.ok, status: r.status, ms: r.ms, checkedAt: now, url: target.url };
+  // ⚠️ КОПИМ ТОЛЬКО УСПЕШНЫЕ. У неудачной пробы `ms` — время ДО ОТКАЗА, то есть чаще всего
+  // таймаут: подмешав его, мы получили бы «медиана выросла до 15 секунд» там, где цель просто
+  // лежала, и «медленно» перестало бы отличаться от «лежит».
+  if (r.ok) latency = appendSample(latency, target.name, r.ms);
+  const stat = summarise(latency[target.name]);
+  results[target.name] = {
+    ok: r.ok,
+    status: r.status,
+    ms: r.ms,
+    checkedAt: now,
+    url: target.url,
+    // Свод по накопленному окну — ради него всё и заведено: порог «медленно» надо НАЗНАЧАТЬ ПО
+    // ЗАМЕРУ, а до 31.08.2026 замеры не сохранялись вовсе и назначать было не по чему.
+    latency: stat,
+  };
   const was = previous.current?.[target.name]?.ok;
   console.log(`${r.ok ? "✅" : "🔴"} ${target.name}: ${r.status || r.error} (${r.ms} мс, попыток ${r.attempts})`);
 
@@ -142,6 +170,9 @@ const history = {
 };
 mkdirSync("data", { recursive: true });
 writeFileSync(HISTORY, `${JSON.stringify(history, null, 2)}\n`);
+// Без отступов: файл машинный, его никто не читает глазами, а 2880 чисел на цель с
+// форматированием весили бы втрое больше на диске машины наблюдателя.
+writeFileSync(LATENCY, `${JSON.stringify(latency)}\n`);
 
 /**
  * ТЕКСТЫ КОРОТКИЕ — ЭТО ТРЕБОВАНИЕ, А НЕ СТИЛЬ (решение владельца 28.08.2026).
