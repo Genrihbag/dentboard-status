@@ -28,6 +28,11 @@ import { syncBoard, loadBoard } from "./board.mjs";
 // проверяться образцами, а этот файл с первой строки ходит наружу.
 import { appendSample, summarise } from "./latency.mjs";
 
+// Разбор причины сетевого отказа — тоже отдельным файлом, и по той же причине. Механизм
+// исполняется ТОЛЬКО при отказе, то есть проверить его можно исключительно образцами и
+// намеренно вызванным сбоем; внутри этого файла он был бы непроверяем.
+import { describeError } from "./error-detail.mjs";
+
 const TIMEOUT_MS = 15_000;
 const HISTORY = "data/history.json";
 /**
@@ -65,7 +70,12 @@ async function probe(target) {
       attempts.push({ ok, status: res.status, ms });
       if (ok) return { ok: true, status: res.status, ms, attempts: i + 1 };
     } catch (e) {
-      attempts.push({ ok: false, error: e instanceof Error ? e.message : String(e), ms: Date.now() - startedAt });
+      /* 🔴 ПРИЧИНА, А НЕ `e.message`. `fetch` оборачивает ЛЮБУЮ сетевую беду в `TypeError` с
+         сообщением-константой «fetch failed»; настоящий диагноз лежит в `cause`. Замер 08.09.2026:
+         кабинет не ответил на три попытки, в истории осталось `"error": "fetch failed"` — и разбор
+         упёрся именно сюда, потому что DNS у наблюдателя, закрытый порт, оборванный маршрут и
+         протухший сертификат выглядели одинаково. Разбор — в `error-detail.mjs`. */
+      attempts.push({ ok: false, error: describeError(e), ms: Date.now() - startedAt });
     }
   }
   const last = attempts[attempts.length - 1];
