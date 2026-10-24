@@ -22,6 +22,8 @@
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { SLOW_MS } from "./avatar.mjs";
+import { signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
+import { describeError } from "./error-detail.mjs";
 
 /** Рядом с историей и решением по аве: одно место для состояния наблюдателя. */
 const STATE = "data/board.json";
@@ -117,11 +119,19 @@ function saveBoard(state) {
 }
 
 async function api(token, method, payload) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  let res;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      // Общий предел круга — см. `budget.mjs`: зависший Telegram не имеет права унести с собой
+      // выкладку страницы, которая идёт после выхода `check.mjs`.
+      signal: signalWithin(TELEGRAM_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { ok: false, body: { description: describeError(e) }, status: 0 };
+  }
   const body = await res.json().catch(() => ({}));
   return { ok: Boolean(body.ok), body, status: res.status };
 }
@@ -209,6 +219,13 @@ export async function syncBoard(results, stamp, statusPage, { changed = false } 
       saveBoard({ messageId: prev.messageId, text: nextText, editedAt: new Date().toISOString() });
       console.log(`[табло] поправлено (№${prev.messageId}, ${d.why})`);
       return { acted: true, mode: "edited", messageId: prev.messageId, why: d.why };
+    }
+    // ⚠️ ОТВЕТА НЕ БЫЛО — ЭТО НЕ ОТКАЗ. Таймаут, обрыв сети или вышедший предел круга не говорят,
+    // что табло нет: правка могла и пройти. Завести новое здесь значило бы плодить закреплённые
+    // табло на каждый медленный круг, оставляя старые застывшими. Следующий круг попробует снова.
+    if (edited.status === 0) {
+      console.log(`[табло] Telegram не ответил на правку №${prev.messageId} (${edited.body.description}) — попробуем на следующем круге`);
+      return { acted: false, mode: "skipped", messageId: prev.messageId, why: "Telegram не ответил" };
     }
     // 🔴 ВОТ ЭТОТ ПУТЬ И ЕСТЬ СТРАХОВКА ОТ ВСЕГО, ЧЕГО Я ПРО TELEGRAM НЕ ЗНАЮ. Сообщение удалили,
     // бота переподключили, вышел срок, о котором в документации не сказано, — исход один: заводим

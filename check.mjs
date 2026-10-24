@@ -33,7 +33,11 @@ import { appendSample, summarise } from "./latency.mjs";
 // намеренно вызванным сбоем; внутри этого файла он был бы непроверяем.
 import { describeError } from "./error-detail.mjs";
 
-const TIMEOUT_MS = 15_000;
+// Опрос целей и общий предел времени круга — отдельными файлами. Зачем предел и почему опрос
+// параллельный, разобрано в `budget.mjs` (авария 23.10.2026).
+import { probeAll } from "./probe.mjs";
+import { remainingMs, signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
+
 const HISTORY = "data/history.json";
 /**
  * Сырые замеры — ОТДЕЛЬНЫМ файлом и НЕ публикуются.
@@ -48,41 +52,7 @@ const KEEP_EVENTS = 500;
 
 const { targets } = JSON.parse(readFileSync("targets.json", "utf8"));
 
-/**
- * ⚠️ ОДНА НЕУДАЧА — ЕЩЁ НЕ ОТКАЗ. Сеть между GitHub и РФ бывает капризной, и тревога на каждую
- * потерянную пачку пакетов обучила бы себя игнорировать. Поэтому цель, не ответившая с первого
- * раза, переспрашивается: настоящий отказ переживёт три попытки, случайная потеря — нет.
- */
-async function probe(target) {
-  const attempts = [];
-  for (let i = 0; i < 3; i += 1) {
-    const startedAt = Date.now();
-    try {
-      const res = await fetch(target.url, {
-        redirect: "manual",
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-        headers: { "user-agent": "dentboard-status/1.0 (+https://github.com)" },
-      });
-      const ms = Date.now() - startedAt;
-      /* Перенаправление — законный ответ живого сервера: `dentboard.ru` уводит на www или https.
-         Считать его отказом значило бы поднимать тревогу на исправной системе. */
-      const ok = res.status === target.expect || (res.status >= 300 && res.status < 400);
-      attempts.push({ ok, status: res.status, ms });
-      if (ok) return { ok: true, status: res.status, ms, attempts: i + 1 };
-    } catch (e) {
-      /* 🔴 ПРИЧИНА, А НЕ `e.message`. `fetch` оборачивает ЛЮБУЮ сетевую беду в `TypeError` с
-         сообщением-константой «fetch failed»; настоящий диагноз лежит в `cause`. Замер 08.09.2026:
-         кабинет не ответил на три попытки, в истории осталось `"error": "fetch failed"` — и разбор
-         упёрся именно сюда, потому что DNS у наблюдателя, закрытый порт, оборванный маршрут и
-         протухший сертификат выглядели одинаково. Разбор — в `error-detail.mjs`. */
-      attempts.push({ ok: false, error: describeError(e), ms: Date.now() - startedAt });
-    }
-  }
-  const last = attempts[attempts.length - 1];
-  return { ok: false, status: last.status ?? 0, ms: last.ms, error: last.error, attempts: attempts.length };
-}
-
-async function telegram(text) {
+async function telegram(text, capMs = TELEGRAM_TIMEOUT_MS) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
@@ -93,11 +63,20 @@ async function telegram(text) {
     // ответ, как отказ Telegram. Разница между ними названа строкой выше.
     return false;
   }
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chat, text, parse_mode: "HTML", disable_web_page_preview: true }),
-  });
+  let res;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chat, text, parse_mode: "HTML", disable_web_page_preview: true }),
+      signal: signalWithin(capMs),
+    });
+  } catch (e) {
+    // Отказ сети или предела — ответ «не отправлено», а не падение круга: история уже записана,
+    // но аватар и табло после этой строки иначе не выполнились бы вовсе.
+    console.log(`телеграм: ОТКАЗ — ${describeError(e)}`);
+    return false;
+  }
   /* ⚠️ ПЕЧАТАЕТСЯ ПРИЧИНА, А НЕ КОД. `телеграм: 400` не отвечает ни на один вопрос, а причин у
      четырёхсотки ровно те, что случаются на практике и лечатся по-разному: бот не администратор
      канала, неверный chat_id, разметка HTML не разобралась. Код возврата одинаков у всех трёх. */
@@ -122,8 +101,12 @@ const rose = [];
 
 let latency = existsSync(LATENCY) ? JSON.parse(readFileSync(LATENCY, "utf8")) : {};
 
-for (const target of targets) {
-  const r = await probe(target);
+const probed = await probeAll(targets, {
+  headers: { "user-agent": "dentboard-status/1.0 (+https://github.com)" },
+});
+
+for (const [i, target] of targets.entries()) {
+  const r = probed[i];
   // ⚠️ КОПИМ ТОЛЬКО УСПЕШНЫЕ. У неудачной пробы `ms` — время ДО ОТКАЗА, то есть чаще всего
   // таймаут: подмешав его, мы получили бы «медиана выросла до 15 секунд» там, где цель просто
   // лежала, и «медленно» перестало бы отличаться от «лежит».
@@ -251,14 +234,24 @@ if (process.env.TEST_MESSAGE === "true") {
   }
 }
 
+/**
+ * ⚠️ СООБЩЕНИЯМ О СМЕНЕ СОСТОЯНИЯ — ВСЁ ОСТАВШЕЕСЯ ВРЕМЯ, А НЕ ОБЩИЕ 5 С. Повтора у них нет:
+ * история уже записана, и на следующем круге «упал» не возникнет снова. Медленный Telegram с
+ * общим пределом терял бы ровно то сообщение, ради которого канал существует; аватару и табло
+ * хватит остатка — они сойдутся на следующих кругах сами.
+ */
+const ALERT_RESERVE_MS = 2_000;
+const alertCap = () => Math.max(TELEGRAM_TIMEOUT_MS, remainingMs() - ALERT_RESERVE_MS);
+
 if (fell.length > 0) {
   await telegram(
     `🔴 <b>Сбой: ${fell.join(", ")}</b>\n${stamp} МСК · работаем над восстановлением.\n` +
       `<a href="${STATUS_PAGE}">Подробности</a>`,
+    alertCap(),
   );
 }
 if (rose.length > 0) {
-  await telegram(`✅ <b>Работает: ${rose.join(", ")}</b>\n${stamp} МСК`);
+  await telegram(`✅ <b>Работает: ${rose.join(", ")}</b>\n${stamp} МСК`, alertCap());
 }
 
 /**

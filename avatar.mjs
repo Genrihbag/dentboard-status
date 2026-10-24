@@ -17,6 +17,8 @@
  * и только тогда смена.
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
+import { describeError } from "./error-detail.mjs";
 
 /** Где храним решение об аватаре. РЯДОМ с историей: перезапуск не должен переставлять аву впустую. */
 const STATE = "data/avatar.json";
@@ -209,7 +211,17 @@ export async function setChatPhoto(state, protectedIds = []) {
   form.append("chat_id", chat);
   form.append("photo", new Blob([readFileSync(path)], { type: "image/png" }), path.split("/").pop());
 
-  const res = await fetch(`https://api.telegram.org/bot${token}/setChatPhoto`, { method: "POST", body: form });
+  let res;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${token}/setChatPhoto`, {
+      method: "POST",
+      body: form,
+      signal: signalWithin(TELEGRAM_TIMEOUT_MS),
+    });
+  } catch (e) {
+    console.error(`[аватар] Telegram не ответил: ${describeError(e)}`);
+    return false;
+  }
   const payload = await res.json().catch(() => ({}));
   if (payload.ok) {
     console.log(`[аватар] поставлен кадр «${state}» (${path})`);
@@ -257,6 +269,7 @@ async function sweepServiceMessage(token, chat, protectedIds = []) {
       headers: { "content-type": "application/json" },
       // Текст виден доли секунды; точка — чтобы не мелькало слово, которое кто-то успеет прочесть.
       body: JSON.stringify({ chat_id: chat, text: ".", disable_notification: true }),
+      signal: signalWithin(TELEGRAM_TIMEOUT_MS),
     });
     const sent = await probe.json().catch(() => ({}));
     const id = sent?.result?.message_id;
@@ -269,6 +282,7 @@ async function sweepServiceMessage(token, chat, protectedIds = []) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chat_id: chat, message_id: messageId }),
+        signal: signalWithin(TELEGRAM_TIMEOUT_MS),
       });
       const d = await r.json().catch(() => ({}));
       return Boolean(d.ok);
