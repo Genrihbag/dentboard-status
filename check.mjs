@@ -28,6 +28,7 @@ import {
   publicView,
   compatCurrent,
   previousStates,
+  previousRows,
   transitions,
   alertTexts,
   balancerAccepts,
@@ -202,14 +203,16 @@ httpTargets.forEach((t, i) => (raw[t.id] = probed[i]));
 (dnsGroup?.rows ?? []).forEach((row, i) => (raw[row.id] = dnsResults[i]));
 for (const row of certGroup?.rows ?? []) raw[row.id] = { perDoor: certResults };
 
-const view = evaluate(config, raw);
+// Прошлые строки — для «двух кругов подряд» у DNS и балансировщиков (`hold` в layout.mjs).
+const view = evaluate(config, raw, { prevRows: previousRows(previous) });
 
 // ⚠️ КОПИМ ТОЛЬКО УСПЕШНЫЕ. У неудачной пробы `ms` — время ДО ОТКАЗА, то есть чаще всего таймаут:
 // подмешав его, мы получили бы «медиана выросла до 15 секунд» там, где цель просто лежала, и
 // «медленно» перестало бы отличаться от «лежит». Ключ — имя строки: у страниц оно прежнее, и
 // накопленное окно переживает смену раскладки.
 const timed = view.groups.flatMap((g) => g.rows).filter((r) => ["http", "balancer", "ready"].includes(r.kind));
-for (const r of timed) if (r.state === "up" && typeof r.ms === "number") latency = appendSample(latency, r.name, r.ms);
+// Удержанная строка (`suspect`) показывает ПРОШЛОЕ время — замером оно не является и в окно не идёт.
+for (const r of timed) if (r.state === "up" && !r.suspect && typeof r.ms === "number") latency = appendSample(latency, r.name, r.ms);
 // Окна снятых целей («API», «API и его зависимости») не копим вечно: их больше никто не пишет.
 latency = Object.fromEntries(Object.entries(latency).filter(([k]) => timed.some((r) => r.name === k)));
 // Свод по накопленному окну — ради него всё и заведено: порог «медленно» надо НАЗНАЧАТЬ ПО ЗАМЕРУ.
@@ -218,8 +221,9 @@ const latencyOf = (r) => (["http", "balancer", "ready"].includes(r.kind) ? summa
 // Журнал круга — ЧАСТНЫЙ (journalctl на машине наблюдателя), поэтому с провайдером и причиной.
 for (const g of view.groups) {
   for (const r of g.rows) {
-    const mark = r.state === "down" ? "🔴" : r.state === "warn" ? "🟡" : r.state === "unknown" ? "⚪" : "✅";
-    console.log(`${mark} ${g.title} · ${r.label ? `${r.name} (${r.label})` : r.name}: ${r.word} — ${r.detail}`);
+    // ⏳ — первый сбой, ещё не подтверждённый вторым кругом: видно только здесь, в журнале.
+    const mark = r.suspect ? "⏳" : r.state === "down" ? "🔴" : r.state === "warn" ? "🟡" : r.state === "unknown" ? "⚪" : "✅";
+    console.log(`${mark} ${g.title} · ${r.label ? `${r.name} (${r.label})` : r.name}: ${r.word} — ${r.heldNote ?? r.detail}`);
   }
 }
 
@@ -396,7 +400,7 @@ writeFileSync(
   const rows = view.groups.flatMap((g) => g.rows);
   const count = (s) => rows.filter((r) => r.state === s).length;
   console.log(
-    `итог: строк ${rows.length} (работает ${count("up")}, внимание ${count("warn")}, не работает ${count("down")}, не проверено ${count("unknown")}), ` +
+    `итог: строк ${rows.length} (работает ${count("up")}, внимание ${count("warn")}, не работает ${count("down")}, не проверено ${count("unknown")}, первый сбой ждёт подтверждения ${rows.filter((r) => r.suspect).length}), ` +
       `свод «${view.overall}», событий ${moved.events.length}${firstOfLayout ? " (первый круг раскладки — по новым строкам сообщений нет)" : ""}`,
   );
 }

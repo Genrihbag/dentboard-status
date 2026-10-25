@@ -147,3 +147,21 @@ test("NXDOMAIN — НЕВЕРНЫЙ ответ, а не молчание: рез
   assert.equal(r.wrong, true);
   assert.match(r.error, /NXDOMAIN/);
 });
+
+test("ПОВТОР: первый пакет потерян (сервер промолчал), второй вопрос получил ответ — ok", async () => {
+  // Случай 25.10.2026 22:41: UDP теряется на пути NL → РФ. Повтор внутри круга — тем же сокетом не
+  // спрашиваем: каждая попытка с нового порта, иначе потеря на одном потоке повторилась бы.
+  let n = 0;
+  const flaky = await serve((q) => (++n === 1 ? null : answer(q, IPS)));
+  const r = await askServer(flaky, NAME, IPS, opts);
+  assert.equal(r.ok, true);
+  assert.equal(n, 2, "ответ получен со второго вопроса");
+});
+
+test("ЗДЕСЬ ПОВТОР НЕ СПАСАЕТ: потеряны обе попытки — «не ответил», а не ok", async () => {
+  let n = 0;
+  const dead2 = await serve((q) => (++n <= 2 ? null : answer(q, IPS)));
+  const r = await askServer(dead2, NAME, IPS, opts);
+  assert.equal(r.ok, false);
+  assert.equal(n, 2, "попыток ровно две — предел круга не растягивается");
+});

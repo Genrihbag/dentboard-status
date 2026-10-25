@@ -232,11 +232,58 @@ export function noticeOf(groups, overall) {
   return "Резерв частично недоступен — на работу это не влияет.";
 }
 
-/** Всё вместе: конфиг + сырые пробы (по `row.id`) → `{ groups, overall }`. */
+const RANK = { up: 0, warn: 1, down: 2 };
+
+/**
+ * ДВА КРУГА ПОДРЯД ДЛЯ ПРОБ ЧЕРЕЗ ДОРОГУ NL → РФ (`confirm` у группы; 25.10.2026).
+ *
+ * 🔴 ПОВОД. 22:41 МСК пришло «🟡 Внимание: DNS 2 — ns1/ns2.yandexcloud.net не ответили за 3000 мс»,
+ * в 22:42 — «✅ Работает». С прода в ту же минуту оба сервера имён Яндекса отвечали верно: терялись
+ * пакеты UDP на пути от наблюдателя, а не DNS. Балансировщики опрашиваются по той же дороге.
+ * Сообщение о сбое, которого не было, учит канал не читать сообщения о сбоях.
+ *
+ * ⚠️ ПОЭТОМУ УХУДШЕНИЕ строки в такой группе принимается, только если его видно `confirm` кругов
+ * подряд. До того строка показывает ПРЕЖНЕЕ состояние — на странице, в табло, в своде и в канале, —
+ * а сам первый сбой запоминается в истории (`suspect`, `suspectRounds`) и виден только в журнале
+ * машины. Улучшение принимается сразу: задерживать хорошую новость незачем.
+ *
+ * ⚠️ СТРАНИЦЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ НЕ ЗАДЕРЖИВАЮТСЯ: у их группы `confirm` нет, красное по ним — сразу.
+ * Цена задержки для DNS и балансировщиков — одна минута, и это «один из двух», который людям не
+ * мешает; когда лежат оба, люди это видят по страницам — те красятся без задержки.
+ */
+export function hold(group, r, prev) {
+  const need = Number(group.confirm ?? 1);
+  if (!(need >= 2) || !prev || !(r.state in RANK)) return r;
+  const was = prev.state === "unknown" ? prev.known : prev.state;
+  if (!(was in RANK)) return r;
+  if (RANK[r.state] <= RANK[was]) return r;
+  const seen = Number(prev.suspectRounds ?? 0) + 1;
+  if (seen >= need) return r;
+  return {
+    ...r,
+    state: was,
+    word: prev.word ?? r.word,
+    value: prev.value ?? null,
+    ms: prev.ms ?? null,
+    slow: false,
+    misleads: false,
+    suspect: r.state,
+    suspectRounds: seen,
+    // Табло видит прежнее (`detail`), журнал машины — правду о первом сбое (`heldNote`).
+    detail: prev.value ?? prev.word ?? r.word,
+    heldNote: `первый сбой, ждём подтверждения следующим кругом (${r.word} — ${r.detail})`,
+  };
+}
+
+/**
+ * Всё вместе: конфиг + сырые пробы (по `row.id`) → `{ groups, overall, notice }`.
+ * `opts.prevRows` — строки прошлого `history.json` по `id` (для `hold`).
+ */
 export function evaluate(config, raw, opts = {}) {
   const balancers = config.groups.find((g) => g.kind === "balancer")?.rows ?? [];
+  const prevRows = opts.prevRows ?? {};
   const groups = config.groups.map((g) => {
-    const rows = g.rows.map((row) => evalRow(g, row, raw[row.id], { ...opts, balancers }));
+    const rows = g.rows.map((row) => hold(g, evalRow(g, row, raw[row.id], { ...opts, balancers }), prevRows[row.id]));
     const state = groupState(rows);
     // У «одного из двух», на котором люди НЕ уходят на запасной, своя фраза (`say.misleads`):
     // «вход работает через второй» там была бы неправдой.
@@ -269,6 +316,12 @@ export function publicView(view, latencyOf = () => undefined, prevStates = {}) {
        * и «Сбой: Сертификат» не уходил бы никогда.
        */
       if (r.state === "unknown" && prevStates[r.id] && prevStates[r.id] !== "unknown") out.known = prevStates[r.id];
+      // Первый сбой, ещё не подтверждённый вторым кругом (`hold`). Страница и канал его не видят —
+      // хранится, чтобы следующий круг знал, что это уже второй.
+      if (r.suspect) {
+        out.suspect = r.suspect;
+        out.suspectRounds = r.suspectRounds;
+      }
       const lat = latencyOf(r);
       if (lat) out.latency = lat;
       return out;
@@ -309,6 +362,14 @@ export function compatCurrent(view, { now, urls = {}, latencyOf = () => undefine
  * именем из `was`: «API и его зависимости», тот же `/health/ready`), берут прошлое из прежнего
  * `current`: сбой, пришедшийся ровно на выкат, иначе прошёл бы молча.
  */
+/** Строки прошлого `history.json` (только текущей раскладки) по `id` — вход для `hold`. */
+export function previousRows(previous) {
+  const out = {};
+  if (previous?.layout !== LAYOUT || !Array.isArray(previous.groups)) return out;
+  for (const g of previous.groups) for (const r of g.rows ?? []) if (r?.id) out[r.id] = r;
+  return out;
+}
+
 export function previousStates(previous, config) {
   const out = {};
   if (previous?.layout === LAYOUT && Array.isArray(previous.groups)) {

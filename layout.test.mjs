@@ -27,7 +27,9 @@ import {
   redact,
   days,
   balancerAccepts,
+  previousRows,
 } from "./layout.mjs";
+import { boardText } from "./board.mjs";
 
 /** Боевой список — чтобы образцы проверяли НАСТОЯЩИЕ тексты и id, а не свою копию. */
 const CONFIG = JSON.parse(readFileSync(new URL("./targets.json", import.meta.url), "utf8"));
@@ -433,4 +435,71 @@ test("сертификат: на странице не рисуется, но в
 test("ЗДЕСЬ ЗЕЛЁНОГО БЫТЬ НЕ ДОЛЖНО: сертификат истёк или чужой — свод «Есть проблемы», хоть его и нет на странице", () => {
   assert.equal(view({ cert: cert(-1, 89, { authorized: false, authorizationError: "CERT_HAS_EXPIRED" }) }).overall, "slow");
   assert.equal(view({ cert: cert(89, 89, { authorized: false, authorizationError: "ERR_TLS_CERT_ALTNAME_INVALID" }) }).overall, "slow");
+});
+
+/* ── ДВА КРУГА ПОДРЯД (DNS и балансировщики; 25.10.2026) ────────────────────────────────── */
+
+/** Прогнать круги подряд так, как это делает `check.mjs`: прошлое — из опубликованного вида. */
+function rounds(patches) {
+  let prevPub = null;
+  const out = [];
+  for (const patch of patches) {
+    const states = previousStates(prevPub, CONFIG);
+    const v = evaluate(CONFIG, { ...healthy(), ...patch }, { slowMs: 1500, prevRows: previousRows(prevPub) });
+    const moved = transitions(v, states, NOW);
+    const texts = alertTexts(moved, v, "25.10, 22:41", "x");
+    prevPub = { layout: LAYOUT, groups: publicView(v, undefined, states) };
+    out.push({ v, moved, texts, pub: prevPub });
+  }
+  return out;
+}
+const pubRow = (pub, id) => pub.groups.flatMap((g) => g.rows).find((r) => r.id === id);
+
+test("DNS: ОДИН провальный круг между здоровыми — ни сообщения, ни жёлтого (случай 22:41)", () => {
+  const [, fail, back] = rounds([{}, { dns2: dnsSilent() }, {}]);
+  assert.equal(fail.texts.length, 0, "сообщения быть не должно");
+  assert.equal(group(fail.v, "dns").state, "up");
+  assert.equal(fail.v.overall, "up");
+  assert.equal(fail.v.notice, null);
+  assert.doesNotMatch(boardText(fail.v, "25.10, 22:41", "x"), /не отвечает/);
+  // Первый сбой хранится в истории — иначе следующий круг не узнал бы, что он второй.
+  assert.equal(pubRow(fail.pub, "dns2").suspect, "down");
+  assert.equal(pubRow(fail.pub, "dns2").state, "up");
+  assert.equal(back.texts.length, 0);
+  assert.equal(pubRow(back.pub, "dns2").suspect, undefined);
+});
+
+test("DNS: ДВА провальных круга подряд — жёлтое и сообщение на втором", () => {
+  const [, first, second] = rounds([{}, { dns2: dnsSilent() }, { dns2: dnsSilent() }]);
+  assert.equal(first.texts.length, 0);
+  assert.equal(group(second.v, "dns").state, "warn");
+  assert.equal(second.texts.length, 1);
+  assert.match(second.texts[0], /^🟡 <b>Внимание: DNS 2<\/b>/);
+});
+
+test("балансировщик: один провальный круг — тишина; два подряд — сообщение", () => {
+  const blip = rounds([{}, { lb2: dead() }, {}]);
+  assert.ok(blip.every((r) => r.texts.length === 0));
+  assert.equal(group(blip[1].v, "balancers").state, "up");
+  const real = rounds([{}, { lb2: dead() }, { lb2: dead() }]);
+  assert.equal(real[1].texts.length, 0);
+  assert.match(real[2].texts[0], /Внимание: Балансировщик 2/);
+});
+
+test("подтверждённый сбой снимается СРАЗУ, без второго круга", () => {
+  const r = rounds([{}, { lb2: dead() }, { lb2: dead() }, {}]);
+  assert.match(r[3].texts[0], /^✅ <b>Работает: Балансировщик 2<\/b>/);
+});
+
+test("ЗДЕСЬ ЗАДЕРЖКИ БЫТЬ НЕ ДОЛЖНО: страница для пользователей краснеет и шлёт «сбой» с первого круга", () => {
+  const [, fail] = rounds([{}, { portal: dead() }]);
+  assert.equal(row(fail.v, "portal").state, "down");
+  assert.match(fail.texts[0], /^🔴 <b>Сбой: Кабинет заказчика<\/b>/);
+  assert.equal(fail.v.overall, "slow");
+});
+
+test("ЗДЕСЬ ЗАДЕРЖКИ БЫТЬ НЕ ДОЛЖНО: первый круг после выката (прошлого нет) — состояние как есть", () => {
+  const [first] = rounds([{ lb2: dead() }]);
+  assert.equal(row(first.v, "lb2").state, "down");
+  assert.equal(first.texts.length, 0);
 });
