@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideRow, ruEvidence, voteView, applyMesh, matrixLines, fetchVote, nlSaw } from "./mesh.mjs";
+import { decideRow, ruEvidence, voteView, applyMesh, matrixLines, fetchVote, nlSaw, shouldAsk, nextAskState, cutoffNotice } from "./mesh.mjs";
+import { CUTOFF_HOLD_ROUNDS } from "./layout.mjs";
 import { evaluate, transitions, previousStates, previousRows, publicView, alertTexts, LAYOUT } from "./layout.mjs";
 import { boardText } from "./board.mjs";
 
@@ -209,6 +210,7 @@ if (host.endsWith("@auth")) { process.stderr.write("dentboard-status@x: Permissi
 if (host.endsWith("@hostkey")) { process.stderr.write("Host key verification failed.\\n"); process.exit(255); }
 if (host.endsWith("@refused")) { process.stderr.write("ssh: connect to host x port 22: Connection refused\\n"); process.exit(255); }
 if (host.endsWith("@hang")) { setTimeout(() => {}, 60000); }
+if (host.endsWith("@catfail")) { process.stderr.write("cat: /var/lib/dentboard-observer/vote.json: No such file or directory\\n"); process.exit(1); }
 if (host.endsWith("@garbage")) { process.stdout.write("не json"); process.exit(0); }
 process.stderr.write("ssh: connect to host x port 22: Connection timed out\\n"); process.exit(255);
 `,
@@ -257,3 +259,101 @@ test("Россия про балансировщик — только СОСЕД
 });
 
 test.after?.(() => rmSync(dir, { recursive: true, force: true }));
+
+/* ── правки по ревью mesh ────────────────────────────────────────────────────────────────── */
+
+const fail = (code, error = code) => ({ ok: false, status: 0, ms: 50, error, code });
+
+test("ЗДЕСЬ ТИШИНЫ БЫТЬ НЕ ДОЛЖНО: имя не находится (ENOTFOUND) — это ответ, Россия (мимо DNS) не спасает", () => {
+  const r = after({ app: fail("ENOTFOUND"), portal: fail("ENOTFOUND"), site: fail("ENOTFOUND") }, both());
+  assert.equal(r.v.overall, "down");
+  assert.match(r.texts[0], /^🔴 <b>Сбой: Кабинет лаборатории, Кабинет заказчика, Сайт<\/b>/);
+});
+
+test("ЗДЕСЬ ТИШИНЫ БЫТЬ НЕ ДОЛЖНО: истёк сертификат у портала — ответ TLS, а не дорога", () => {
+  const r = after({ portal: fail("CERT_HAS_EXPIRED") }, both());
+  assert.match(r.texts[0], /Сбой: Кабинет заказчика/);
+});
+
+test("а тайм-аут соединения (ETIMEDOUT) — дорога: Россия видит — тишина", () => {
+  const r = after({ portal: fail("ETIMEDOUT") }, both());
+  assert.equal(r.texts.length, 0);
+});
+
+test("попытки «502, 502, тайм-аут» — цель отвечает ошибкой, Россия не перекрывает", () => {
+  assert.equal(nlSaw({ ok: false, status: 0, answered: true, code: "TimeoutError" }), "http");
+  const r = after({ portal: { ok: false, status: 0, ms: 15000, answered: true, code: "TimeoutError", error: "x" } }, both());
+  assert.match(r.texts[0], /Сбой: Кабинет заказчика/);
+});
+
+test("NL отрезан: прежнее держится CUTOFF_HOLD_ROUNDS кругов, потом — «не проверен», а не вечное зелёное", () => {
+  let prevPub = round({}, both()).pub;
+  const off = { "door-1": unreachable, "door-2": unreachable };
+  let r;
+  for (let i = 1; i <= CUTOFF_HOLD_ROUNDS + 1; i += 1) {
+    r = round(isolated(), off, { controlsOk: false, prevPub });
+    prevPub = r.pub;
+    if (i <= CUTOFF_HOLD_ROUNDS) assert.equal(row(r.v, "app").state, "up", `круг ${i}: ещё прежнее`);
+    assert.equal(r.texts.length, 0, `круг ${i}: тревог нет`);
+  }
+  assert.equal(row(r.v, "app").state, "unknown", "после предела — «не проверен»");
+  const pubApp = r.pub.groups.flatMap((g) => g.rows).find((x) => x.id === "app");
+  assert.equal(pubApp.known, "up", "прошлое не потеряно");
+  // и снова видит — строка возвращается, событий «поднялся» нет (не проверен → работает)
+  const back = round({}, both(), { prevPub });
+  assert.equal(row(back.v, "app").state, "up");
+  assert.equal(back.texts.length, 0);
+});
+
+test("сообщение «монитор не видит Россию» — со второго круга, одно; «снова видит» — одно; одиночная минута — тишина", () => {
+  const a = cutoffNotice(null, true, "2026-10-25T20:00:00.000Z", "25.10, 23:00");
+  assert.equal(a.say, null);
+  const b = cutoffNotice(a.state, true, "2026-10-25T20:01:00.000Z", "25.10, 23:01");
+  assert.match(b.say, /Монитор не видит Россию<\/b> с 23:00 МСК/);
+  const c = cutoffNotice(b.state, true, "2026-10-25T20:02:00.000Z", "25.10, 23:02");
+  assert.equal(c.say, null, "повторно не пишем");
+  const d = cutoffNotice(c.state, false, "2026-10-25T20:03:00.000Z", "25.10, 23:03");
+  assert.match(d.say, /снова видит Россию/);
+  assert.equal(d.state, null);
+  const blip = cutoffNotice(cutoffNotice(null, true, "x", "s").state, false, "y", "s");
+  assert.equal(blip.say, null, "одна минута без связи — ни начала, ни конца");
+});
+
+test("отступ после «ключ не принят»: 30 минут дверь не спрашиваем (fail2ban), потом снова", () => {
+  const st = nextAskState({}, [{ id: "door-1", reach: "auth", error: "ключ не принят" }, { id: "door-2", reach: "ok" }], 1000);
+  assert.equal(shouldAsk(st["door-1"], 1000 + 60), false);
+  assert.equal(shouldAsk(st["door-1"], 1000 + 31 * 60), true);
+  assert.equal(st["door-2"], undefined);
+  assert.equal(shouldAsk(undefined, 1000), true);
+  assert.equal(shouldAsk({ reach: "net", at: 1000 }, 1001), true, "ЗДЕСЬ отступа НЕ должно: нет связи — не повод молчать");
+  const cleared = nextAskState(st, [{ id: "door-1", reach: "ok" }], 3000);
+  assert.equal(cleared["door-1"], undefined);
+  const kept = nextAskState(st, [{ id: "door-1", reach: "backoff", skipped: true }], 1100);
+  assert.equal(kept["door-1"].at, 1000, "пропущенный круг отсчёт не сдвигает");
+});
+
+test("пропущенная дверь (отступ) — не доказательство связи с Россией и не точка", () => {
+  const off = { "door-1": { reach: "backoff", error: "ключ не принят; повтор через 20 мин" }, "door-2": unreachable };
+  const r = after(isolated(), off, { controlsOk: false });
+  assert.equal(r.mesh.roadOk, false);
+  assert.match(r.matrix.join("\n"), /балансировщик 1: голос недоступен \(ключ не принят; повтор через 20 мин\)/);
+});
+
+test("Россия видит, что балансировщик ОТВЕЧАЕТ ОШИБКОЙ — «не работает», misleads, «Сбой» сразу", () => {
+  const r = after({ lb2: net() }, both({ "door-1": { peer: "down" } }));
+  assert.equal(row(r.v, "lb2").word, "не работает");
+  assert.equal(row(r.v, "lb2").misleads, true);
+  assert.match(r.texts[0], /^🔴 <b>Сбой: Балансировщик 2<\/b>/);
+});
+
+test("ЗДЕСЬ «Россия не видит» НЕ должно: у двери своя сеть лежит (прод unknown) — её «сосед молчит» не довод", () => {
+  const r = after({ lb2: net() }, both({ "door-1": { peer: "unreachable", prod: "000", prodState: "unknown" } }), { controlsOk: true });
+  // доводов из России нет — дорога жива, верим NL как раньше (удержание: первый круг)
+  assert.equal(r.mesh.notes.ruDown.length, 0);
+});
+
+test("ssh: команда на двери упала (нет vote.json) — дверь ответила («bad»), а не «нет связи»", async () => {
+  const f = await get("catfail");
+  assert.equal(f.reach, "bad");
+  assert.match(f.error, /No such file/);
+});

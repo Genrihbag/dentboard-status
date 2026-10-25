@@ -15,7 +15,7 @@
  * отказе, и проверить его можно лишь настоящим сбоем (`probe.test.mjs`), а `check.mjs` с первой
  * строки читает цели и ходит наружу.
  */
-import { describeError } from "./error-detail.mjs";
+import { describeError, errorCodeOf } from "./error-detail.mjs";
 import { PROBE_BUDGET_MS } from "./budget.mjs";
 
 /** Одна попытка. Не больше остатка общего предела — см. `probeOne`. */
@@ -82,7 +82,7 @@ async function probeOne(target, { until, attemptTimeoutMs, maxAttempts, headers 
     } catch (e) {
       /* 🔴 ПРИЧИНА, А НЕ `e.message` — разбор в `error-detail.mjs`. Зависший сервер здесь даёт
          `TimeoutError`, отказавший — код сети; это два разных звонка хостеру. */
-      attempts.push({ ok: false, error: describeError(e), ms: Date.now() - startedAt });
+      attempts.push({ ok: false, error: describeError(e), code: errorCodeOf(e), ms: Date.now() - startedAt });
     }
   }
   // Ни одной попытки — предел вышел раньше, чем цель дошла до очереди. При параллельном опросе
@@ -92,5 +92,22 @@ async function probeOne(target, { until, attemptTimeoutMs, maxAttempts, headers 
     return { ok: false, status: 0, ms: 0, error: "не опрошена: предел времени круга вышел", attempts: 0 };
   }
   const last = attempts[attempts.length - 1];
-  return { ok: false, status: last.status ?? 0, ms: last.ms, body: last.body, error: last.error, attempts: attempts.length };
+  /**
+   * `answered` — хоть одна попытка получила КОД ответа (ревью 25.10.2026): «502, 502, тайм-аут» —
+   * это цель, которая отвечает ошибкой, а не порванная дорога, и Россия такой отказ не перекрывает.
+   * `code` — код сетевого отказа последней попытки (mesh.mjs отличает «до цели не дошли» от «цель
+   * ответила отказом»: DNS без имени, чужой сертификат).
+   */
+  const coded = attempts.filter((a) => a.status);
+  return {
+    ok: false,
+    status: last.status ?? 0,
+    ms: last.ms,
+    body: last.body,
+    error: last.error,
+    code: last.code ?? null,
+    answered: coded.length > 0,
+    answeredStatus: coded.length ? coded[coded.length - 1].status : null,
+    attempts: attempts.length,
+  };
 }

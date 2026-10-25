@@ -38,7 +38,7 @@ import {
 import { getVia, readCert } from "./door-probe.mjs";
 import { probeDnsProvider } from "./dns-probe.mjs";
 // Взаимная проверка с нескольких точек: голоса дверей «из России» (25.10.2026).
-import { fetchVote, controlsReachable, applyMesh, matrixLines } from "./mesh.mjs";
+import { fetchVote, controlsReachable, applyMesh, matrixLines, shouldAsk, nextAskState, cutoffNotice, AUTH_BACKOFF_S } from "./mesh.mjs";
 import { resolve as resolvePath } from "node:path";
 // Табло — тоже отдельным файлом и по той же причине: расписание правок и текст обязаны
 // проверяться образцами, без сети и без Telegram.
@@ -185,11 +185,26 @@ const meshCfg = config.mesh ?? null;
 const sshCmd = process.env.STATUS_SSH ? JSON.parse(process.env.STATUS_SSH) : ["ssh"];
 const meshKey = process.env.STATUS_DOOR_KEY ?? meshCfg?.key ?? null;
 const meshKnown = resolvePath(meshCfg?.knownHosts ?? "vps/doors.known_hosts");
+// Отступ после отказа ключа — состояние машины-наблюдателя (data/mesh.json, в git не хранится).
+const MESH_STATE = "data/mesh.json";
+let askState = {};
+try {
+  askState = existsSync(MESH_STATE) ? JSON.parse(readFileSync(MESH_STATE, "utf8")) : {};
+} catch {
+  askState = {};
+}
+const nowSec = Date.now() / 1000;
 const meshFetch = meshCfg
   ? Promise.all(
-      (meshCfg.vantages ?? []).map((v) =>
-        within(fetchVote(v, { key: meshKey, knownHosts: meshKnown, user: meshCfg.user, ssh: sshCmd }), { id: v.id, reach: "net", ms: null, error: LATE }),
-      ),
+      (meshCfg.vantages ?? []).map((v) => {
+        const prev = askState[v.id];
+        if (!shouldAsk(prev, nowSec)) {
+          // Не спрашиваем: «ключ не принят» был недавно. Это не связь с дверью (дорогу не доказывает).
+          const left = Math.ceil((prev.at + AUTH_BACKOFF_S - nowSec) / 60);
+          return Promise.resolve({ id: v.id, reach: "backoff", ms: null, error: `${prev.error}; повтор через ${left} мин`, skipped: true });
+        }
+        return within(fetchVote(v, { key: meshKey, knownHosts: meshKnown, user: meshCfg.user, ssh: sshCmd }), { id: v.id, reach: "net", ms: null, error: LATE });
+      }),
     )
   : Promise.resolve([]);
 const meshControls = meshCfg?.controls?.length ? within(controlsReachable(meshCfg.controls), false) : Promise.resolve(false);
@@ -290,10 +305,14 @@ const history = {
   current: compatCurrent(view, { now, urls, latencyOf }),
   // `redact` и по ПРЕЖНИМ событиям: их писал старый код, который адреса из причины не вырезал.
   events: [...moved.events, ...(previous.events ?? [])].slice(0, KEEP_EVENTS).map((e) => ({ ...e, error: redact(e.error ?? null) })),
+  // Наблюдатель отрезан от России: с какого момента и объявлено ли (mesh.mjs `cutoffNotice`). Без
+  // адресов: только время и счёт кругов.
+  observerCut: cutoffNotice(previous.observerCut ?? null, Boolean(meshed.mesh?.notes.cutoff), now, "").state,
   updatedAt: now,
 };
 mkdirSync("data", { recursive: true });
 writeFileSync(HISTORY, `${JSON.stringify(history, null, 2)}\n`);
+writeFileSync(MESH_STATE, `${JSON.stringify(nextAskState(askState, fetchedVotes, nowSec))}\n`);
 // Без отступов: файл машинный, его никто не читает глазами, а 2880 чисел на цель с
 // форматированием весили бы втрое больше на диске машины наблюдателя.
 writeFileSync(LATENCY, `${JSON.stringify(latency)}\n`);
@@ -377,6 +396,11 @@ const alertCap = () => Math.max(TELEGRAM_TIMEOUT_MS, remainingMs() - ALERT_RESER
 // Тексты — в `layout.mjs` (проверяются образцами): по сообщению на «сбой», «внимание», «работает».
 // Матрица «кто кого видит» — к «Сбою» и «Вниманию»: по ней видно, сколько мест не видит цель.
 for (const text of alertTexts(moved, view, stamp, STATUS_PAGE, matrix)) await telegram(text, alertCap());
+// Монитор слеп к России (или снова видит) — одно сообщение на начало и одно на конец.
+{
+  const cut = cutoffNotice(previous.observerCut ?? null, Boolean(meshed.mesh?.notes.cutoff), now, stamp);
+  if (cut.say) await telegram(cut.say, alertCap());
+}
 
 /**
  * АВАТАР КАНАЛА — ПОСЛЕ записи истории и ПОСЛЕ сообщений.

@@ -277,15 +277,23 @@ const RANK = { up: 0, warn: 1, down: 2 };
  * Цена задержки для DNS и балансировщиков — одна минута, и это «один из двух», который людям не
  * мешает; когда лежат оба, люди это видят по страницам — те красятся без задержки.
  */
+/** Сколько кругов (минут) держать прежнее состояние, пока NL отрезан от России (`hold`). */
+export const CUTOFF_HOLD_ROUNDS = Number(process.env.STATUS_CUTOFF_HOLD_ROUNDS ?? 10);
+
 export function hold(group, r, prev) {
   // NL отрезан от России (mesh.mjs) — у ЛЮБОЙ строки, не только с `confirm`: показываем прежнее, а
   // правду пишем в журнал. Прошлого нет — «не проверен», как и было.
   if (r.cutoff) {
-    if (!prev) return r;
+    // ⚠️ НЕ БЕССРОЧНО (ревью 25.10.2026): прежнее держится CUTOFF_HOLD_ROUNDS кругов, дальше — честное
+    // «не проверен» (с `known`). Иначе «NL отрезан + настоящая авария» не было бы видно никогда, а
+    // страница вечно показывала бы зелёное по данным часовой давности. Счёт кругов — в истории.
+    const n = Number(prev?.cutoffRounds ?? 0) + 1;
+    if (!prev || n > CUTOFF_HOLD_ROUNDS) return { ...r, cutoffRounds: n };
     const was = prev.state === "unknown" ? prev.known : prev.state;
-    if (!(was in RANK)) return r;
+    if (!(was in RANK)) return { ...r, cutoffRounds: n };
     return {
       ...r,
+      cutoffRounds: n,
       state: was,
       word: prev.word ?? r.word,
       value: prev.value ?? null,
@@ -413,6 +421,8 @@ export function publicView(view, latencyOf = () => undefined, prevStates = {}) {
       }
       // Для удержания: что табло показывало по строке (без провайдеров и адресов). Страница не рисует.
       if (r.shownDetail) out.shownDetail = r.shownDetail;
+      // Сколько кругов подряд NL отрезан от России — предел удержания прежнего (`hold`).
+      if (r.cutoffRounds) out.cutoffRounds = r.cutoffRounds;
       const lat = latencyOf(r);
       if (lat) out.latency = lat;
       return out;

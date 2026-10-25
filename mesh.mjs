@@ -30,6 +30,7 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { CUTOFF_HOLD_ROUNDS } from "./layout.mjs";
 
 /** Голос старше — не точка наблюдения. Тот же порог, что у дома (failover_logic VOTE_MAX_AGE_S). */
 export const VOTE_MAX_AGE_S = 45;
@@ -68,12 +69,68 @@ export function fetchVote(v, { key, knownHosts, user = "dentboard-status", ssh =
           return resolve({ id: v.id, reach: "bad", ms, error: "голос не разобрался" });
         }
       }
-      if (/Permission denied/i.test(why)) return resolve({ id: v.id, reach: "auth", ms, error: "ключ не принят" });
+      if (err.killed) return resolve({ id: v.id, reach: "net", ms, error: `не ответила за ${timeoutMs} мс` });
+      // Код выхода ssh — 255 только у ошибок САМОГО ssh (связь, ключ). Любой другой ненулевой код —
+      // это команда на двери (`cat`) отработала и упала: дверь ответила, а голоса нет (ревью 25.10.2026).
+      // Переполнение буфера — тоже ответ, а не «нет связи».
+      if (err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return resolve({ id: v.id, reach: "bad", ms, error: "голос слишком велик" });
+      if (typeof err.code === "number" && err.code !== 255) return resolve({ id: v.id, reach: "bad", ms, error: why || `команда на двери: код ${err.code}` });
+      if (/Permission denied \(/i.test(why)) return resolve({ id: v.id, reach: "auth", ms, error: "ключ не принят" });
       if (/Host key verification failed|REMOTE HOST IDENTIFICATION/i.test(why)) return resolve({ id: v.id, reach: "hostkey", ms, error: "ключ хоста не совпал" });
       if (/Connection refused/i.test(why)) return resolve({ id: v.id, reach: "refused", ms, error: "ssh закрыт" });
-      return resolve({ id: v.id, reach: "net", ms, error: err.killed ? `не ответила за ${timeoutMs} мс` : why || "нет связи" });
+      return resolve({ id: v.id, reach: "net", ms, error: why || "нет связи" });
     });
   });
+}
+
+/**
+ * ОТСТУП ПОСЛЕ ОТКАЗА КЛЮЧА (ревью 25.10.2026). Ключ NL появляется раньше, чем учётка на дверях
+ * (`arm.sh --observers`), и после смены ключа — тоже: тогда каждый круг давал бы двери «Invalid user»
+ * / «Permission denied», и fail2ban с jail sshd забанил бы адрес NL примерно за пять минут — а вместе
+ * с ним и установку на двери (она отказывает, если NL в бане). Поэтому после `auth`/`hostkey` дверь
+ * не спрашивается AUTH_BACKOFF_S: два входа в час fail2ban не накопит.
+ */
+export const AUTH_BACKOFF_S = Number(process.env.STATUS_AUTH_BACKOFF_MIN ?? 30) * 60;
+
+/** Спрашивать ли дверь сейчас; `prev` — запись из data/mesh.json `{ reach, at, error }`. */
+export function shouldAsk(prev, nowSec, backoffS = AUTH_BACKOFF_S) {
+  if (!prev || !["auth", "hostkey"].includes(prev.reach)) return true;
+  return !(nowSec - prev.at < backoffS && nowSec >= prev.at);
+}
+
+/** Запомнить отказ ключа (или забыть, если его нет) — следующее состояние data/mesh.json. */
+export function nextAskState(state, results, nowSec) {
+  const out = { ...state };
+  for (const f of results) {
+    if (f.skipped) continue;
+    if (["auth", "hostkey"].includes(f.reach)) out[f.id] = { reach: f.reach, at: nowSec, error: f.error };
+    else delete out[f.id];
+  }
+  return out;
+}
+
+/**
+ * NL ОТРЕЗАН ОТ РОССИИ — одно сообщение на начало и одно на конец (ревью 25.10.2026), а не тишина:
+ * удержание прежнего ограничено (`CUTOFF_HOLD_ROUNDS`), и владелец обязан знать, что монитор слеп.
+ * Объявляется со ВТОРОГО круга подряд — одиночная минута без связи не повод писать в канал.
+ * Возвращает `{ state, say }`: `state` — в историю (`observerCut`), `say` — текст или null.
+ */
+export function cutoffNotice(prev, cutoff, nowIso, stamp) {
+  if (!cutoff) {
+    const say = prev?.announced ? `📡 <b>Монитор снова видит Россию</b>\n${stamp} МСК` : null;
+    return { state: null, say };
+  }
+  const since = prev?.since ?? nowIso;
+  const rounds = Number(prev?.rounds ?? 0) + 1;
+  const announce = rounds >= 2 && !prev?.announced;
+  const at = new Date(since).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit" });
+  return {
+    state: { since, rounds, announced: Boolean(prev?.announced) || announce },
+    say: announce
+      ? `📡 <b>Монитор не видит Россию</b> с ${at} МСК: из NL нет связи ни с балансировщиками, ни с сайтами в РФ. ` +
+        `Это дорога, а не авария; прежнее состояние держится ${CUTOFF_HOLD_ROUNDS} мин, дальше — «не проверен».`
+      : null,
+  };
 }
 
 /** Дорога в Россию из NL: ответил ли хоть один контрольный сайт в РФ (любым кодом). */
@@ -115,13 +172,22 @@ const numOrNull = (x) => (typeof x === "number" && Number.isFinite(x) ? x : null
 export function ruEvidence(row, kind, votes, balancerIp) {
   const up = [];
   const down = [];
+  const codes = [];
   for (const v of votes) {
     if (!v.fresh) continue;
     if (kind === "balancer") {
       // Балансировщик — глазами СОСЕДНЕЙ двери (поле `peer`). Свой голос двери про её :443 не говорит.
       if (!v.peer || v.peer.addr !== balancerIp) continue;
       if (v.peer.state === "up") up.push(withMs(v.name, v.peer.ms));
-      else if (v.peer.state === "down" || v.peer.state === "unreachable") down.push(`${v.name}: ${v.peer.state === "down" ? `код ${v.peer.code}` : "не отвечает"}`);
+      // У двери, чья СВОЯ сеть лежит (прод `unknown` — контроль не ответил), «сосед не отвечает» —
+      // про её сеть, а не про соседа (ревью 25.10.2026).
+      else if (v.peer.state === "unreachable" && v.prod?.state !== "unknown") down.push(`${v.name}: не отвечает`);
+      else if (v.peer.state === "down") {
+        down.push(`${v.name}: код ${v.peer.code}`);
+        // Сосед ОТВЕТИЛ кодом ошибки — людям на этом входе показывается ошибка, на запасной они не
+        // уходят: это `misleads`, и строке нужен код, а не «не отвечает».
+        if (/^\d+$/.test(v.peer.code) && v.peer.code !== "000") codes.push(Number(v.peer.code));
+      }
     } else {
       // Страницы и сервер — прод глазами двери. «Видно» — последняя проба 200; «не видно» — голос
       // «down» (три неудачи подряд у самой двери), а одиночная неудача ещё ни то, ни другое.
@@ -140,18 +206,36 @@ export function ruEvidence(row, kind, votes, balancerIp) {
     const fresh = votes.filter((v) => v.fresh);
     const peers = fresh.filter((v) => v.peer);
     if (peers.length > 0 && !peers.some((v) => v.peer.state === "up")) {
-      return { up: [], down: [...down, "вход в России не виден ни одной дверью"] };
+      return { up: [], down: [...down, "вход в России не виден ни одной дверью"], codes };
     }
   }
-  return { up, down };
+  return { up, down, codes };
 }
 const withMs = (name, ms) => (ms === null ? name : `${name} · ${ms} мс`);
 
-/** Как NL увидел строку: ok | http (ответ кодом) | net (ответа нет). */
+/**
+ * Сетевые отказы, при которых до цели НЕ ДОШЛИ — только они бывают дорогой NL → РФ.
+ *
+ * 🔴 ВСЁ ПРОЧЕЕ — ОТВЕТ (ревью 25.10.2026). `ENOTFOUND` (имени нет — делегирование потеряно),
+ * `CERT_HAS_EXPIRED`, `ERR_TLS_CERT_ALTNAME_INVALID` и родня — это то, что увидит и человек; Россия
+ * же ходит мимо DNS (`--resolve`) и только на `app.`, поэтому на такой отказ ответила бы «видно» и
+ * спрятала бы настоящую аварию. Неизвестный код — тоже ответ: прятать то, чего не понимаем, нельзя.
+ */
+const NET_CODES = new Set([
+  "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN",
+  "ENETDOWN", "EPIPE", "EAI_AGAIN", "TimeoutError", "AbortError", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
+  "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+]);
+
+/** Как NL увидел строку: ok | http (ответ — кодом или отказом DNS/TLS) | net (до цели не дошли). */
 export function nlSaw(r) {
   if (!r) return "none";
   if (r.ok) return "ok";
-  return r.status ? "http" : "net";
+  // Хоть одна попытка получила код — цель отвечает ошибкой (`probe.mjs`, «502, 502, тайм-аут»).
+  if (r.status || r.answered) return "http";
+  // Не опрошена (предел круга вышел) или причины нет — дорогу исключить нельзя.
+  if (!r.code) return "net";
+  return NET_CODES.has(r.code) ? "net" : "http";
 }
 
 /**
@@ -200,7 +284,10 @@ export function applyMesh(config, raw, { fetched = {}, controlsOk = false, nowSe
           out[row.id] = { ...r, viaRU: true, ruText: ru.up.join(", "), nlError: r?.error ?? null };
           notes.ruUp.push(row.name);
         } else if (d.verdict === "ru-down") {
-          out[row.id] = { ...r, ruText: ru.down.join(", ") };
+          // Балансировщик, который Россия видит ОТВЕЧАЮЩИМ ошибкой, — с её кодом: строка «не работает»
+          // и `misleads` (людям на этом входе показывается ошибка), а не «не отвечает».
+          const status = g.kind === "balancer" && ru.codes?.length ? ru.codes[0] : r?.status ?? 0;
+          out[row.id] = { ...r, status, ruText: ru.down.join(", ") };
           notes.ruDown.push(row.name);
         } else if (d.verdict === "cutoff") {
           out[row.id] = { cutoff: true, nlError: r?.error ?? null };

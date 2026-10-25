@@ -69,3 +69,24 @@ export function describeError(e) {
 
   return chain.join(" ← ");
 }
+
+/**
+ * Самый глубокий КОД отказа в цепочке (`ETIMEDOUT`, `ENOTFOUND`, `CERT_HAS_EXPIRED`…) или имя
+ * (`TimeoutError`, `AbortError`), если кода нет. `null` — не нашлось ничего.
+ *
+ * Нужен не для текста, а для РЕШЕНИЯ (mesh.mjs): «до цели не дошли» (сеть) и «цель ответила
+ * отказом» (DNS без имени, чужой или истёкший сертификат) лечатся по-разному, и только первое
+ * может быть дорогой NL → РФ, а не аварией.
+ */
+export function errorCodeOf(e) {
+  let found = null;
+  const seen = new Set();
+  let cur = e;
+  while (cur instanceof Error && !seen.has(cur) && seen.size < MAX_DEPTH + 2) {
+    seen.add(cur);
+    if (typeof cur.code === "string" && cur.code) found = cur.code;
+    else if (!found && (cur.name === "TimeoutError" || cur.name === "AbortError")) found = cur.name;
+    cur = cur.cause ?? (Array.isArray(cur.errors) ? cur.errors[0] : undefined);
+  }
+  return found;
+}
