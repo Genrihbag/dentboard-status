@@ -192,3 +192,28 @@ test("одна строка свёрнутой группы не провере�
   const h = withBalancers(["up", "unknown"]);
   assert.match(rowsOf(visible(render(h)), "balancers"), /1 из 2 работает/);
 });
+
+test("1 из 2 балансировщиков НЕ ОТВЕЧАЕТ (тайм-аут) — свод up, заголовок «Все сервисы работают» + оговорка про резерв", () => {
+  const config = JSON.parse(readFileSync(TARGETS, "utf8"));
+  const ok = { ok: true, status: 200, ms: 100 };
+  const ready = { ...ok, body: JSON.stringify({ status: "ok", checks: { postgres: { up: true, latency_ms: 1 }, redis: { up: true, latency_ms: 0 } } }) };
+  const dns = { ok: true, wrong: false, answered: 2, total: 2, answers: [] };
+  const timeout = { ok: false, status: 0, ms: 15000, error: "This operation was aborted (TimeoutError)", code: "TimeoutError" };
+  const view = evaluate(config, { app: ok, portal: ok, site: ok, api: ok, server: ready, lb1: ok, lb2: timeout, dns1: dns, dns2: dns });
+  assert.equal(view.overall, "up");
+  const page = visible(render({ layout: 2, overall: view.overall, notice: view.notice, groups: publicView(view), current: {}, events: [], updatedAt: "2026-10-26T10:00:00.000Z" }));
+  assert.match(page, /<h1 data-headline>Все сервисы работают<\/h1>/);
+  assert.match(page, /Резерв частично недоступен — на работу это не влияет\./);
+  assert.match(rowsOf(page, "balancers"), /1 из 2 работает/);
+  assert.doesNotMatch(page, /Есть проблемы|Мы знаем о проблеме/);
+});
+
+test("ЗДЕСЬ «Все сервисы работают» НЕ ДОЛЖНО: балансировщик отвечает КОДОМ ошибки (людям видна ошибка) — «Есть проблемы»", () => {
+  const config = JSON.parse(readFileSync(TARGETS, "utf8"));
+  const ok = { ok: true, status: 200, ms: 100 };
+  const ready = { ...ok, body: JSON.stringify({ status: "ok", checks: { postgres: { up: true, latency_ms: 1 }, redis: { up: true, latency_ms: 0 } } }) };
+  const dns = { ok: true, wrong: false, answered: 2, total: 2, answers: [] };
+  const view = evaluate(config, { app: ok, portal: ok, site: ok, api: ok, server: ready, lb1: ok, lb2: { ok: false, status: 502, ms: 30 }, dns1: dns, dns2: dns });
+  const page = visible(render({ layout: 2, overall: view.overall, notice: view.notice, groups: publicView(view), current: {}, events: [], updatedAt: "2026-10-26T10:00:00.000Z" }));
+  assert.match(page, /<h1 data-headline>Есть проблемы<\/h1>/);
+});
