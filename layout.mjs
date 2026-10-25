@@ -9,7 +9,7 @@
  *
  * ⚠️ ВСЁ ЗДЕСЬ — ЧИСТЫЕ ФУНКЦИИ, И ЭТО ГЛАВНОЕ В ФАЙЛЕ. Пути отказа (одна дверь, оба DNS, сертификат
  * на исходе) исполняются только при настоящей аварии; проверить их можно лишь подменой входа —
- * `layout.test.mjs` и подменный круг (`FAKE_PROBES` в `check.mjs`). Внутри `check.mjs`, который с
+ * `layout.test.mjs` и подменный круг (`STATUS_TARGETS` в `check.mjs`, README). Внутри `check.mjs`, который с
  * первой строки ходит наружу, они были бы непроверяемы.
  *
  * ⚠️ ПУБЛИЧНОЕ И ЧАСТНОЕ РАЗВЕДЕНЫ ЗДЕСЬ, А НЕ У ПОТРЕБИТЕЛЯ (решение владельца 25.10.2026). На
@@ -36,7 +36,13 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 /** Адреса из текста ошибки — наружу не выходят (страница и её JSON публичны). */
 export function redact(text) {
   if (text == null) return null;
-  return String(text).replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "…");
+  return (
+    String(text)
+      .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "…")
+      // IPv6: группы шестнадцатеричных цифр через двоеточие. Чтобы не съесть время вида «10:30:00»,
+      // вырезается только то, где есть буква a–f или «::».
+      .replace(/\[?(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\]?(?::\d+)?/gi, (m) => (/[a-f]|::/i.test(m) ? "…" : m))
+  );
 }
 
 /** Отказ HTTP-пробы человеческим словом для канала: код или причина. */
@@ -49,6 +55,8 @@ function httpWhy(r) {
 export function readiness(body) {
   try {
     const j = JSON.parse(body ?? "");
+    // Без `checks` это не тело готовности (заглушка, чужой JSON) — `null`, а не «всё лежит».
+    if (!j || typeof j !== "object" || !j.checks || typeof j.checks !== "object") return null;
     const pg = j?.checks?.postgres;
     const rd = j?.checks?.redis;
     return {
@@ -62,6 +70,14 @@ export function readiness(body) {
   }
 }
 
+/**
+ * Ответил ли балансировщик САМ: довёл запрос до сервера. 200 — да; 503 с телом готовности — тоже да
+ * (сервер не готов, но это дело строки «Сервер и база»); 503 без тела, 502, 504 — нет.
+ */
+export function balancerAccepts(status, body) {
+  return status === 200 || (status === 503 && readiness(body) !== null);
+}
+
 /** Одна строка из сырой пробы. Возвращает `{ id, name, kind, state, word, value, ms, slow, detail }`. */
 export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}) {
   const base = { id: row.id, name: row.name, kind: group.kind, label: row.label ?? null, ip: row.ip ?? null };
@@ -70,9 +86,18 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
   if (group.kind === "http" || group.kind === "balancer") {
     if (r.ok) {
       const slow = typeof r.ms === "number" && r.ms > slowMs;
-      return { ...base, state: "up", word: "работает", value: `${r.ms} мс`, ms: r.ms, slow, detail: `${r.ms} мс`, status: r.status };
+      // Балансировщик, доведший запрос до неготового сервера (503 с телом готовности), жив —
+      // неготовность называет строка «Сервер и база».
+      const note = r.status && r.status !== 200 ? ` (сервер ответил ${r.status})` : "";
+      return { ...base, state: "up", word: "работает", value: `${r.ms} мс`, ms: r.ms, slow, detail: `${r.ms} мс${note}`, status: r.status };
     }
-    return { ...base, state: "down", word: r.status ? "не работает" : "не отвечает", value: null, ms: null, slow: false, detail: httpWhy(r), status: r.status ?? 0, error: r.error ?? null };
+    /**
+     * `misleads` — отказ, на котором люди НЕ уходят на запасной вход: браузер переспрашивает другой
+     * адрес только при отказе соединения, а ответ кодом (502, 504, 503 без тела) он показывает
+     * человеку. Такой отказ в паре — уже не «резерв», а беда для части людей (ревью 25.10.2026).
+     */
+    const misleads = group.kind === "balancer" && Boolean(r.status);
+    return { ...base, state: "down", word: r.status ? "не работает" : "не отвечает", value: null, ms: null, slow: false, detail: httpWhy(r), status: r.status ?? 0, error: r.error ?? null, misleads };
   }
 
   if (group.kind === "ready") {
@@ -93,7 +118,8 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
     const tally = `ответили ${r.answered} из ${r.total}`;
     const detail = [tally, ...bad].join("; ");
     if (r.ok) return { ...base, state: "up", word: "работает", value: null, ms: null, slow: false, detail };
-    return { ...base, state: "down", word: r.wrong ? "отвечает неверно" : "не отвечает", value: null, ms: null, slow: false, detail };
+    // Неверный ответ резолвер кэширует и отдаёт людям — запасной провайдер их не спасает.
+    return { ...base, state: "down", word: r.wrong ? "отвечает неверно" : "не отвечает", value: null, ms: null, slow: false, detail, misleads: Boolean(r.wrong) };
   }
 
   if (group.kind === "cert") {
@@ -167,7 +193,9 @@ export function groupState(rows) {
  * («🟡 Внимание»), и строка на странице жёлтая — оговорка видна тому, кто смотрит подробно.
  *
  * Медленно — как и раньше, ДВЕ медленные строки, а не одна: одиночный выброс говорит о своей
- * цели, а не о системе. Считаются строки с временем ответа (страницы, балансировщики, сервер).
+ * цели, а не о системе. Считаются страницы и сервер; балансировщики — НЕТ: они ходят в тот же
+ * `/health/ready`, что и «Сервер и база», и одна медленная готовность засчитывалась бы трижды
+ * (ревью 25.10.2026). Медленный балансировщик виден своим жёлтым числом на странице и в табло.
  */
 export function overallOf(groups) {
   const rows = groups.flatMap((g) => g.rows);
@@ -175,14 +203,17 @@ export function overallOf(groups) {
   const users = groups.find((g) => g.id === "users");
   if (users && users.state === "down") return "down";
   if (groups.some((g) => hurtsPeople(g))) return "slow";
-  if (rows.filter((r) => r.slow).length >= SLOW_TARGETS_MIN) return "slow";
+  if (rows.filter((r) => r.slow && r.kind !== "balancer").length >= SLOW_TARGETS_MIN) return "slow";
   return "up";
 }
 
 /** Плохо ли людям от состояния группы — см. `overallOf`. */
-function hurtsPeople(g) {
+export function hurtsPeople(g) {
   if (g.state === "down") return true;
   if (g.state !== "warn") return false;
+  // Отказ, на котором люди НЕ уходят на запасной (DNS с неверным адресом, балансировщик с кодом
+  // ошибки), — беда для части людей, даже если второй исправен.
+  if (g.rows.some((r) => r.misleads)) return true;
   // Жёлтая группа взаимозаменяемых частей — это резерв, а жёлтый сертификат — срок, не отказ.
   return !(g.redundant || g.kind === "cert");
 }
@@ -195,7 +226,10 @@ export function noticeOf(groups, overall) {
   if (overall !== "up") return null;
   const soft = groups.filter((g) => g.state === "warn");
   if (soft.length === 0) return null;
-  if (soft.every((g) => g.kind === "cert")) return "Сертификат скоро истекает, продлеваем — на работу это не влияет.";
+  const cert = soft.some((g) => g.kind === "cert");
+  const reserve = soft.some((g) => g.kind !== "cert");
+  if (cert && reserve) return "Резерв частично недоступен, сертификат скоро истекает — на работу это не влияет.";
+  if (cert) return "Сертификат скоро истекает, продлеваем — на работу это не влияет.";
   return "Резерв частично недоступен — на работу это не влияет.";
 }
 
@@ -205,7 +239,10 @@ export function evaluate(config, raw, opts = {}) {
   const groups = config.groups.map((g) => {
     const rows = g.rows.map((row) => evalRow(g, row, raw[row.id], { ...opts, balancers }));
     const state = groupState(rows);
-    const summary = state === "warn" || state === "down" ? (g.say?.[state] ?? g.say?.down ?? null) : null;
+    // У «одного из двух», на котором люди НЕ уходят на запасной, своя фраза (`say.misleads`):
+    // «вход работает через второй» там была бы неправдой.
+    const key = state === "warn" && rows.some((r) => r.misleads) && g.say?.misleads ? "misleads" : state;
+    const summary = state === "warn" || state === "down" ? (g.say?.[key] ?? g.say?.down ?? null) : null;
     return { id: g.id, title: g.title, kind: g.kind, redundant: g.redundant === true, state, summary, rows };
   });
   const overall = overallOf(groups);
@@ -216,7 +253,7 @@ export function evaluate(config, raw, opts = {}) {
  * ПУБЛИКУЕМЫЙ ВИД — копируются ТОЛЬКО перечисленные поля. `detail`, `label`, `error` — частные и
  * сюда не попадают по построению (см. шапку файла).
  */
-export function publicView(view, latencyOf = () => undefined) {
+export function publicView(view, latencyOf = () => undefined, prevStates = {}) {
   return view.groups.map((g) => ({
     id: g.id,
     title: g.title,
@@ -224,6 +261,13 @@ export function publicView(view, latencyOf = () => undefined) {
     summary: g.summary,
     rows: g.rows.map((r) => {
       const out = { id: r.id, name: r.name, state: r.state, word: r.word, value: r.value, ms: r.ms, slow: r.slow };
+      /**
+       * `known` — последнее ИЗВЕСТНОЕ состояние строки, пока она «не проверена» (ревью 25.10.2026).
+       * Без него «не проверен» стирал прошлое: оба балансировщика легли → сертификат «не проверен»
+       * → балансировщик поднялся с истёкшим сертификатом, а смены «из ничего» событием не считаются,
+       * и «Сбой: Сертификат» не уходил бы никогда.
+       */
+      if (r.state === "unknown" && prevStates[r.id] && prevStates[r.id] !== "unknown") out.known = prevStates[r.id];
       const lat = latencyOf(r);
       if (lat) out.latency = lat;
       return out;
@@ -260,19 +304,24 @@ export function compatCurrent(view, { now, urls = {}, latencyOf = () => undefine
  * первый в жизни круг. Иначе выкат в спокойный день разослал бы в канал «работает: Балансировщик
  * 1, Балансировщик 2, DNS 1, …» — пост ни о чём, который учит канал не читать.
  *
- * Строки, жившие и в прежней раскладке под ТЕМ ЖЕ ИМЕНЕМ (страницы для пользователей), берут
- * прошлое из прежнего `current`: сбой, пришедшийся ровно на выкат, иначе прошёл бы молча.
+ * Строки, жившие и в прежней раскладке (страницы — под тем же именем, «Сервер и база» — под
+ * именем из `was`: «API и его зависимости», тот же `/health/ready`), берут прошлое из прежнего
+ * `current`: сбой, пришедшийся ровно на выкат, иначе прошёл бы молча.
  */
 export function previousStates(previous, config) {
   const out = {};
   if (previous?.layout === LAYOUT && Array.isArray(previous.groups)) {
-    for (const g of previous.groups) for (const r of g.rows ?? []) if (r?.id) out[r.id] = r.state;
+    for (const g of previous.groups) {
+      for (const r of g.rows ?? []) if (r?.id) out[r.id] = r.state === "unknown" && r.known ? r.known : r.state;
+    }
     return out;
   }
-  const users = config.groups.find((g) => g.id === "users");
-  for (const row of users?.rows ?? []) {
-    const was = previous?.current?.[row.name];
-    if (was && typeof was.ok === "boolean") out[row.id] = was.ok ? "up" : "down";
+  for (const g of config.groups) {
+    if (g.kind !== "http" && g.kind !== "ready") continue;
+    for (const row of g.rows) {
+      const was = previous?.current?.[row.was ?? row.name];
+      if (was && typeof was.ok === "boolean") out[row.id] = was.ok ? "up" : "down";
+    }
   }
   return out;
 }
@@ -307,7 +356,8 @@ export function transitions(view, prevStates, now) {
        * Лёг второй — группа красная, и та же строка уходит уже «сбоем».
        */
       if (r.state === "up") up.push(item);
-      else if (r.state === "down" && !(g.redundant && g.state !== "down")) down.push(item);
+      // Отказ, на котором люди не уходят на запасной (`misleads`), — «сбой» и при живом втором.
+      else if (r.state === "down" && (r.misleads || !(g.redundant && g.state !== "down"))) down.push(item);
       else warn.push(item);
       events.push({
         at: now,

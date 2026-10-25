@@ -18,7 +18,8 @@
  * это 30 байт, разбор ответа — полсотни строк, и оба проверяются образцами без сети.
  */
 import { createSocket } from "node:dgram";
-import { lookup } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
+import { isIP } from "node:net";
 import { randomInt } from "node:crypto";
 
 /** Один вопрос одному серверу. Авторитетный сервер отвечает за десятки мс; 3 с — уже молчание. */
@@ -148,6 +149,10 @@ export async function askServer(server, name, expect, { resolveHost = defaultRes
   for (let i = 0; i < attempts; i += 1) {
     try {
       const r = await queryA(ip, name, { timeoutMs, port });
+      // NXDOMAIN от авторитетного сервера — НЕВЕРНЫЙ ответ, а не молчание: резолвер его кэширует и
+      // соседа не переспрашивает (ревью 25.10.2026). REFUSED / SERVFAIL — молчание: резолвер
+      // переспросит другой сервер.
+      if (r.rcode === "NXDOMAIN") return { server, ok: false, wrong: true, addresses: [], error: "ответ NXDOMAIN (имени нет)", ms: r.ms };
       if (r.rcode !== "NOERROR") return { server, ok: false, addresses: [], error: `ответ ${r.rcode}`, ms: r.ms };
       const got = [...new Set(r.addresses)].sort();
       const missing = expect.filter((a) => !got.includes(a));
@@ -164,8 +169,17 @@ export async function askServer(server, name, expect, { resolveHost = defaultRes
   return { server, ok: false, addresses: [], error: lastError };
 }
 
+/**
+ * Адрес сервера имён — через c-ares (`Resolver`) с коротким таймаутом, а не `lookup`.
+ * ⚠️ `lookup` — системный getaddrinfo без таймаута на общем пуле потоков libuv (их 4): при
+ * тормозящем резолвере наблюдателя он ждал бы сколько угодно и занимал потоки, нужные `fetch`
+ * (ревью 25.10.2026).
+ */
+const resolver = new Resolver({ timeout: 2_000, tries: 1 });
 async function defaultResolve(host) {
-  const { address } = await lookup(host, { family: 4 });
+  if (isIP(host)) return host;
+  const [address] = await resolver.resolve4(host);
+  if (!address) throw new Error("нет A-записи");
   return address;
 }
 

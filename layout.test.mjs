@@ -26,6 +26,7 @@ import {
   alertTexts,
   redact,
   days,
+  balancerAccepts,
 } from "./layout.mjs";
 
 /** Боевой список — чтобы образцы проверяли НАСТОЯЩИЕ тексты и id, а не свою копию. */
@@ -47,7 +48,7 @@ const dnsWrong = () => ({
   wrong: true,
   answered: 3,
   total: 4,
-  answers: [{ server: "c.ns.selectel.ru", ok: false, wrong: true, error: "отдаёт 109.196.100.86 (нет 136.234.13.100, 153.51.113.60; лишний 109.196.100.86)" }],
+  answers: [{ server: "c.ns.selectel.ru", ok: false, wrong: true, error: "отдаёт 203.0.113.7 (нет 136.234.13.100, 153.51.113.60; лишний 203.0.113.7)" }],
 });
 const dnsSilent = () => ({ ok: false, wrong: false, answered: 0, total: 2, answers: [{ server: "ns1.yandexcloud.net", ok: false, error: "не ответил за 3000 мс" }] });
 const cert = (d1 = 89, d2 = d1, extra = {}) => ({
@@ -108,8 +109,8 @@ test("лёг ОДИН балансировщик — группа жёлтая, 
   assert.equal(v.notice, "Резерв частично недоступен — на работу это не влияет.");
 });
 
-test("один DNS и сертификат < 14 дней — тоже зелёный свод с оговоркой", () => {
-  assert.equal(view({ dns1: dnsWrong() }).overall, "up");
+test("один DNS молчит и сертификат < 14 дней — тоже зелёный свод с оговоркой", () => {
+  assert.equal(view({ dns2: dnsSilent() }).overall, "up");
   const c = view({ cert: cert(10) });
   assert.equal(c.overall, "up");
   assert.match(c.notice, /Сертификат скоро истекает/);
@@ -148,7 +149,7 @@ test("один DNS отдаёт не те адреса — «отвечает н
   const v = view({ dns1: dnsWrong() });
   assert.equal(row(v, "dns1").word, "отвечает неверно");
   assert.equal(group(v, "dns").state, "warn");
-  assert.match(row(v, "dns1").detail, /c\.ns\.selectel\.ru: отдаёт 109\.196\.100\.86/);
+  assert.match(row(v, "dns1").detail, /c\.ns\.selectel\.ru: отдаёт 203.0.113.7/);
 });
 
 test("молчащий DNS — «не отвечает», а не «отвечает неверно»", () => {
@@ -252,7 +253,7 @@ test("пустой вход — «unknown», а не «всё хорошо»", (
 test("публичный вид НЕ несёт провайдеров, адресов и серверов имён — ни при каком состоянии", () => {
   const v = view({ lb2: dead(), dns1: dnsWrong(), cert: cert(10) });
   const text = JSON.stringify(publicView(v));
-  for (const leak of ["Selectel", "Yandex", "Яндекс", "СПб", "selectel.ru", "yandexcloud", ...IPS, "109.196.100.86", "ETIMEDOUT"]) {
+  for (const leak of ["Selectel", "Yandex", "Яндекс", "СПб", "selectel.ru", "yandexcloud", ...IPS, "203.0.113.7", "ETIMEDOUT"]) {
     assert.ok(!text.includes(leak), `в публичном виде нашлось «${leak}»`);
   }
 });
@@ -349,4 +350,73 @@ test("поднялся один из двух упавших — «работа�
   assert.equal(msgs.length, 1);
   assert.match(msgs[0], /^✅ <b>Работает: Балансировщик 1<\/b>/);
   assert.match(msgs[0], /вход работает через второй/);
+});
+
+/* ── ПРАВКИ ПО РЕВЬЮ 25.10.2026 ──────────────────────────────────────────────────────────── */
+
+test("балансировщик, доведший запрос до НЕГОТОВОГО сервера (503 с телом готовности), жив", () => {
+  // Иначе лежащая база красила бы оба балансировщика: «вход не работает» — неверный диагноз.
+  const body = JSON.stringify({ status: "error", checks: { postgres: { up: false }, redis: { up: true } } });
+  assert.equal(balancerAccepts(200, "{}"), true);
+  assert.equal(balancerAccepts(503, body), true);
+});
+
+test("ЗДЕСЬ ЖИВЫМ БЫТЬ НЕ ДОЛЖЕН: 503 без тела готовности, 502, 504", () => {
+  assert.equal(balancerAccepts(503, "<html>Service Unavailable</html>"), false);
+  assert.equal(balancerAccepts(503, '{"message":"x"}'), false);
+  assert.equal(balancerAccepts(502, ""), false);
+  assert.equal(balancerAccepts(504, ""), false);
+});
+
+test("медленная готовность считается ОДИН раз, а не трижды (балансировщики в счёт медленных не идут)", () => {
+  assert.equal(view({ server: ready(1600), lb1: up(1600), lb2: up(1600) }).overall, "up");
+});
+
+test("ЗДЕСЬ ЗЕЛЁНОГО БЫТЬ НЕ ДОЛЖНО: медленные страница и сервер", () => {
+  assert.equal(view({ app: up(1600), server: ready(1600) }).overall, "slow");
+});
+
+test("один DNS отдаёт НЕВЕРНЫЙ адрес — это не резерв: свод жёлтый, своя фраза, корзина «сбой»", () => {
+  const v = view({ dns1: dnsWrong() });
+  assert.equal(v.overall, "slow");
+  assert.equal(v.notice, null);
+  assert.match(group(v, "dns").summary, /отдаёт неверный адрес/);
+  const moved = transitions(v, previousStates(asPrev(view()), CONFIG), NOW);
+  assert.deepEqual(moved.down.map((x) => x.row.name), ["DNS 1"]);
+});
+
+test("балансировщик отвечает кодом ошибки — люди на второй не уходят: свод жёлтый, «сбой»", () => {
+  const v = view({ lb2: { ok: false, status: 502, ms: 40 } });
+  assert.equal(v.overall, "slow");
+  assert.match(group(v, "balancers").summary, /отвечает ошибкой/);
+  const moved = transitions(v, previousStates(asPrev(view()), CONFIG), NOW);
+  assert.deepEqual(moved.down.map((x) => x.row.name), ["Балансировщик 2"]);
+});
+
+test("«не проверен» не стирает прошлое: сертификат истёк, пока балансировщики лежали, — событие есть", () => {
+  const healthyPrev = previousStates(asPrev(view()), CONFIG);
+  const outage = view({ lb1: dead(), lb2: dead(), cert: { perDoor: [{ door: "lb1", ok: false, error: "x" }, { door: "lb2", ok: false, error: "y" }] } });
+  const outagePublished = { layout: LAYOUT, groups: publicView(outage, undefined, healthyPrev) };
+  const certRow = outagePublished.groups.find((g) => g.id === "cert").rows[0];
+  assert.equal(certRow.state, "unknown");
+  assert.equal(certRow.known, "up");
+  const back = view({ cert: cert(-1, -1, { authorized: false, authorizationError: "CERT_HAS_EXPIRED" }) });
+  const moved = transitions(back, previousStates(outagePublished, CONFIG), NOW);
+  assert.ok(moved.down.some((x) => x.row.name === "Сертификат"), "«Сбой: Сертификат» обязан уйти");
+});
+
+test("первый круг после выката: «Сервер и база» помнит прошлое «API и его зависимости»", () => {
+  const prev = previousStates({ current: { ...OLD.current, "API и его зависимости": { ok: false } }, events: [] }, CONFIG);
+  assert.equal(prev.server, "down");
+  const moved = transitions(view(), prev, NOW);
+  assert.deepEqual(moved.up.map((x) => x.row.name), ["Сервер и база"]);
+});
+
+test("адреса IPv6 вырезаются; время вида 10:30:00 — нет", () => {
+  assert.equal(redact("connect ECONNREFUSED 2a03:6f00:1::5:443 (x)"), "connect ECONNREFUSED … (x)");
+  assert.equal(redact("в 10:30:00 ответа не было"), "в 10:30:00 ответа не было");
+});
+
+test("оговорка: резерв и сертификат вместе — названы оба", () => {
+  assert.match(view({ lb2: dead(), cert: cert(10) }).notice, /Резерв частично недоступен, сертификат скоро истекает/);
 });

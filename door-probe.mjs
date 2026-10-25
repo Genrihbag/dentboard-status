@@ -85,10 +85,14 @@ export function readCert(ip, host, { timeoutMs = 10_000, port = 443, now = Date.
       // проверено живым запросом с чужим именем: ERR_TLS_CERT_ALTNAME_INVALID), так что «отдаёт
       // чужой сертификат» отличимо от «отдаёт наш» без своей проверки имени.
       const authorizationError = sock.authorized ? null : String(sock.authorizationError ?? "не проверен");
+      // Неразборчивая дата — отказ с причиной, а не RangeError из `toISOString` внутри обработчика:
+      // необработанное исключение здесь уронило бы весь круг до записи истории (ревью 25.10.2026).
+      const days = daysLeft(cert.valid_to, now);
+      if (days === null) return done({ ok: false, error: `срок сертификата не разобрался: «${cert.valid_to}»` });
       done({
         ok: true,
         validTo: new Date(cert.valid_to).toISOString(),
-        days: daysLeft(cert.valid_to, now),
+        days,
         authorized: authorizationError === null,
         authorizationError,
       });

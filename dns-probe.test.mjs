@@ -87,7 +87,7 @@ async function serve(handler) {
 after(() => servers.forEach((s) => s.close()));
 
 const right = () => serve((q) => answer(q, IPS));
-const lying = () => serve((q) => answer(q, ["109.196.100.86"]));
+const lying = () => serve((q) => answer(q, ["203.0.113.7"]));
 const half = () => serve((q) => answer(q, [IPS[0]]));
 const silent = () => serve(() => null);
 const refused = () => serve((q) => answer(q, [], { rcode: 5 }));
@@ -108,7 +108,7 @@ test("ЗДЕСЬ OK БЫТЬ НЕ ДОЛЖНО: только один из дв�
 test("чужой адрес — «отдаёт …» с перечнем", async () => {
   const r = await askServer(await lying(), NAME, IPS, opts);
   assert.equal(r.wrong, true);
-  assert.match(r.error, /лишний 109\.196\.100\.86/);
+  assert.match(r.error, /лишний 203.0.113.7/);
 });
 
 test("молчание — «не ответил», и это НЕ «неверно»", async () => {
@@ -140,4 +140,10 @@ test("провайдер: молчат все — неисправен", async (
   const r = await probeDnsProvider([await silent(), await silent()], NAME, IPS, opts);
   assert.equal(r.ok, false);
   assert.equal(r.answered, 0);
+});
+
+test("NXDOMAIN — НЕВЕРНЫЙ ответ, а не молчание: резолвер его кэширует и соседа не спросит", async () => {
+  const r = await askServer(await serve((q) => answer(q, [], { rcode: 3 })), NAME, IPS, opts);
+  assert.equal(r.wrong, true);
+  assert.match(r.error, /NXDOMAIN/);
 });

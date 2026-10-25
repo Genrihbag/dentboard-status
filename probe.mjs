@@ -57,8 +57,11 @@ async function probeOne(target, { until, attemptTimeoutMs, maxAttempts, headers 
         const res = await fetch(target.url, { redirect: "manual", signal, headers });
         status = res.status;
         if (target.readBody) {
-          // Тело нужно готовности: в нём задержки базы и Redis.
-          body = await res.text().catch(() => undefined);
+          // Тело нужно готовности: в нём задержки базы и Redis. Недочитанное тело — неудачная
+          // попытка с названной причиной (и повтор), а не «200 без тела» с непонятной красной строкой.
+          body = await res.text().catch((e) => {
+            throw new Error(`тело ответа не дочитано (${describeError(e)})`);
+          });
         } else {
           // Тело не нужно — нужен код. Без отмены незабранное тело держит соединение, а сервер,
           // приславший заголовки и зависший на теле, держал бы его до конца процесса.
@@ -69,7 +72,11 @@ async function probeOne(target, { until, attemptTimeoutMs, maxAttempts, headers 
       /* Перенаправление — законный ответ живого сервера: `dentboard.ru` уводит на www или https.
          Считать его отказом значило бы поднимать тревогу на исправной системе.
          ⚠️ НО НЕ У ГОТОВНОСТИ (`strict`): там 3xx — это не «работает», а чужой ответ вместо нашего. */
-      const ok = status === target.expect || (!target.strict && status >= 300 && status < 400);
+      // `accept` — своё правило «ответил сам» (балансировщик: 200 ИЛИ 503 с телом готовности).
+      const ok =
+        typeof target.accept === "function"
+          ? target.accept(status, body)
+          : status === target.expect || (!target.strict && status >= 300 && status < 400);
       attempts.push({ ok, status, ms, body });
       if (ok) return { ok: true, status, ms, body, attempts: i + 1 };
     } catch (e) {

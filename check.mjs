@@ -30,6 +30,8 @@ import {
   previousStates,
   transitions,
   alertTexts,
+  balancerAccepts,
+  redact,
 } from "./layout.mjs";
 // Балансировщик по адресу мимо DNS и сертификат, который он отдаёт; прямой вопрос провайдерам DNS.
 import { getVia, readCert } from "./door-probe.mjs";
@@ -50,7 +52,7 @@ import { describeError } from "./error-detail.mjs";
 // Опрос целей и общий предел времени круга — отдельными файлами. Зачем предел и почему опрос
 // параллельный, разобрано в `budget.mjs` (авария 23.10.2026).
 import { probeAll } from "./probe.mjs";
-import { remainingMs, signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
+import { remainingMs, signalWithin, TELEGRAM_TIMEOUT_MS, PROBE_BUDGET_MS } from "./budget.mjs";
 
 const HISTORY = "data/history.json";
 /**
@@ -139,6 +141,14 @@ for (const g of config.groups) {
         id: row.id,
         expect: 200,
         strict: true,
+        /**
+         * 🔴 БАЛАНСИРОВЩИК ЖИВ, ЕСЛИ ДОВЁЛ ЗАПРОС ДО СЕРВЕРА — даже когда тот ответил 503 «не готов»
+         * (ревью 25.10.2026). Иначе лежащая база красила бы ОБА балансировщика, страница писала бы
+         * «оба балансировщика недоступны — вход не работает», а в канал уходил бы неверный диагноз.
+         * Готовность сервера — дело строки «Сервер и база». 503 БЕЗ тела готовности (заглушка самого
+         * балансировщика), 502, 504, сетевая ошибка — отказ балансировщика.
+         */
+        accept: balancerAccepts,
         attempt: ({ signal, headers }) => getVia(row.ip, g.host, g.path, { signal, headers, port: row.port ?? 443 }),
       });
     }
@@ -147,12 +157,42 @@ for (const g of config.groups) {
 const dnsGroup = groupOf("dns");
 const certGroup = groupOf("cert");
 
+/**
+ * DNS И СЕРТИФИКАТ — В ТОМ ЖЕ ПРЕДЕЛЕ, ЧТО И ОПРОС ЦЕЛЕЙ (ревью 25.10.2026). Их собственные
+ * таймауты короткие, но разрешение имени сервера имён и соединение могут застрять на стороне
+ * наблюдателя; без общего срока `Promise.all` ждал бы дольше отведённого и съедал время сообщений.
+ * Не успели — отказ с названной причиной, а не ожидание.
+ */
+const until = Date.now() + PROBE_BUDGET_MS;
+function within(promise, fallback) {
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), Math.max(0, until - Date.now()));
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+const LATE = "не успели: предел времени круга вышел";
+
 const [probed, dnsResults, certResults] = await Promise.all([
   probeAll(httpTargets, { headers: { "user-agent": "dentboard-status/1.0 (+https://github.com)" } }),
-  Promise.all((dnsGroup?.rows ?? []).map((row) => probeDnsProvider(row.servers, dnsGroup.query, expectIps))),
+  Promise.all(
+    (dnsGroup?.rows ?? []).map((row) =>
+      within(probeDnsProvider(row.servers, dnsGroup.query, expectIps), {
+        ok: false,
+        wrong: false,
+        answered: 0,
+        total: row.servers.length,
+        answers: [{ server: "все", ok: false, error: LATE }],
+        ms: null,
+      }),
+    ),
+  ),
   Promise.all(
     certGroup
-      ? balancers.map(async (b) => ({ door: b.id, ...(await readCert(b.ip, certGroup.host, { port: b.port ?? 443 })) }))
+      ? balancers.map(async (b) => ({
+          door: b.id,
+          ...(await within(readCert(b.ip, certGroup.host, { port: b.port ?? 443 }), { ok: false, error: LATE })),
+        }))
       : [],
   ),
 ]);
@@ -214,9 +254,10 @@ const history = {
   overall: view.overall,
   // Оговорка к зелёному своду («резерв частично недоступен — на работу не влияет»), иначе null.
   notice: view.notice,
-  groups: publicView(view, latencyOf),
+  groups: publicView(view, latencyOf, prevStates),
   current: compatCurrent(view, { now, urls, latencyOf }),
-  events: [...moved.events, ...(previous.events ?? [])].slice(0, KEEP_EVENTS),
+  // `redact` и по ПРЕЖНИМ событиям: их писал старый код, который адреса из причины не вырезал.
+  events: [...moved.events, ...(previous.events ?? [])].slice(0, KEEP_EVENTS).map((e) => ({ ...e, error: redact(e.error ?? null) })),
   updatedAt: now,
 };
 mkdirSync("data", { recursive: true });
