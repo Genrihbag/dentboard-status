@@ -601,3 +601,16 @@ test("кабинеты (parseStatus в ztl-lab): в current — «API» и «Б�
   assert.equal(cur["База данных и кэш"].ok, true);
   assert.equal(cur["Сервер и база"], undefined);
 });
+
+test("медленные «API» и «База данных и кэш» разом — ОДНА причина: свод не желтеет", () => {
+  assert.equal(view({ api: up(1600), server: ready(1600) }).overall, "up");
+});
+
+test("ЗДЕСЬ ЗЕЛЁНОГО БЫТЬ НЕ ДОЛЖНО: медленные сервер и страница — две причины", () => {
+  assert.equal(view({ api: up(1600), app: up(1600) }).overall, "slow");
+});
+
+test("медленная готовность — в табло видно общее время ответа", () => {
+  assert.match(row(view({ server: ready(1600, 1) }), "server").detail, /ответ 1600 мс/);
+  assert.doesNotMatch(row(view({ server: ready(200, 1) }), "server").detail, /ответ/);
+});

@@ -312,10 +312,11 @@ export function matrixLines(config, rawBeforeMesh, mesh) {
   const self = config.mesh?.self ?? { name: "NL", region: "Европа" };
   const balancers = config.groups.find((g) => g.kind === "balancer")?.rows ?? [];
   // Сервер — его строки живости и готовности («API», «База данных и кэш»), по виду строки.
-  const serverRows = config.groups.flatMap((g) => g.rows.map((row) => ({ row, kind: row.kind ?? g.kind }))).filter((x) => x.kind === "ready" || (x.kind === "http" && x.row.id === "api"));
+  const serverRows = config.groups.flatMap((g) => g.rows.map((row) => ({ row, kind: row.kind ?? g.kind }))).filter((x, _i, all) => x.kind === "ready" || (x.kind === "http" && config.groups.some((g) => g.rows.includes(x.row) && g.rows.some((r) => (r.kind ?? g.kind) === "ready"))));
   const seen = (r) => (!r ? "не проверен" : r.ok ? (typeof r.ms === "number" ? `${r.ms} мс` : "отвечает") : r.status ? `код ${r.status}` : "не отвечает");
   const nlParts = [];
-  for (const { row } of serverRows) nlParts.push(`${row.id === "api" ? "API" : "готовность"} ${seen(rawBeforeMesh[row.id])}`);
+  // Подпись — по виду пробы, а не по id: переименованная строка не пропадёт из матрицы молча.
+  for (const { row, kind } of serverRows) nlParts.push(`${kind === "ready" ? "готовность" : row.name} ${seen(rawBeforeMesh[row.id])}`);
   for (const b of balancers) nlParts.push(`${b.name.toLowerCase()} ${seen(rawBeforeMesh[b.id])}`);
   const lines = [`${self.region} · ${self.name}: ${nlParts.join(" · ")}`];
   const nameOfIp = (ip) => balancers.find((b) => b.ip === ip)?.name.toLowerCase() ?? ip;

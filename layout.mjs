@@ -135,7 +135,9 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
       const slow = typeof r.ms === "number" && r.ms > slowMs;
       // Табло: задержка базы и кэша — числа строки «База данных и кэш»; время ответа самого сервера —
       // у строки «API» (25.10.2026: «вынеси api отдельно»).
-      const shown = [db, cache].filter(Boolean).join(", ") || `${r.ms} мс`;
+      // Медленная готовность — с общим временем ответа: иначе 🟡 стоял бы рядом с «база 1 мс, кэш 0 мс»
+      // и причина была бы не видна (ревью 26.10.2026).
+      const shown = [db, cache, slow ? `ответ ${r.ms} мс` : null].filter(Boolean).join(", ") || `${r.ms} мс`;
       return { ...base, state: "up", word: "работают", value: db, ms: r.ms, dbMs: rd.dbMs, slow, detail: shown, shownDetail: shown, status: r.status };
     }
     const why = [httpWhy(r)];
@@ -236,7 +238,14 @@ export function overallOf(groups) {
   const users = groups.find((g) => g.id === "users");
   if (users && users.state === "down") return "down";
   if (groups.some((g) => hurtsPeople(g))) return "slow";
-  if (rows.filter((r) => r.slow && r.kind !== "balancer").length >= SLOW_TARGETS_MIN) return "slow";
+  // Группа «Сервер» — ОДНА причина: «API» и «База данных и кэш» ходят на один хост, и тормозящий
+  // сервер делал бы медленными обе — свод желтел бы от одной причины (ревью 26.10.2026). Считается
+  // не больше одной медленной строки на группу с готовностью.
+  const slowCount = groups.reduce((n, g) => {
+    const slow = g.rows.filter((r) => r.slow && r.kind !== "balancer").length;
+    return n + (g.rows.some((r) => r.kind === "ready") ? Math.min(slow, 1) : slow);
+  }, 0);
+  if (slowCount >= SLOW_TARGETS_MIN) return "slow";
   return "up";
 }
 

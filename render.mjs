@@ -112,10 +112,13 @@ try {
 function countWord(rows) {
   const known = rows.filter((r) => r && r.state !== "unknown");
   if (known.length === 0) return "не проверены";
+  // Знаменатель — ВСЕ строки группы: «1 из 1» при одной непроверенной прятало бы, что вторая не
+  // проверена (ревью 26.10.2026). Владелец описывал счёт как «… из 2».
+  const total = rows.length;
   const up = known.filter((r) => r.state === "up").length;
   if (up === 0) return "не работают";
   const n = up % 10 === 1 && up % 100 !== 11 ? "работает" : "работают";
-  return up + " из " + known.length + " " + n;
+  return up + " из " + total + " " + n;
 }
 const hiddenGroup = (g) => g.onPage === false || configOff.includes(g.id);
 const shown = groups.filter((g) => !hiddenGroup(g));
@@ -212,6 +215,16 @@ const cards = shown
  */
 const phrase = (e) => (e.phrase ? e.phrase : e.state === "упал" ? "перестал отвечать" : "снова отвечает");
 const events = (Array.isArray(h.events) ? h.events : []).filter((e) => !offPage.has(e.group));
+/**
+ * Событие свёрнутой группы («Балансировщики», «DNS») — от имени ГРУППЫ: отдельных «Балансировщик 2»
+ * на странице нет (решение владельца 26.10.2026), и в истории их тоже не показываем. Запись в
+ * history.json не меняется — меняется только то, как её рисует страница.
+ */
+const collapsedTitles = new Set(groups.filter((g) => configCollapse.includes(g.id)).map((g) => g.title));
+function eventText(e) {
+  if (collapsedTitles.has(e.group)) return `<b>${esc(e.group)}</b> — один ${esc(phrase(e))}`;
+  return `<b>${esc(e.target)}</b> ${esc(phrase(e))}`;
+}
 const historyBlock =
   events.length === 0
     ? ""
@@ -224,7 +237,7 @@ const historyBlock =
         .map(
           (e) => `<li class="event">
             <span class="event-time">${when(e.at)}</span>
-            <span><b>${esc(e.target)}</b> ${esc(phrase(e))}</span>
+            <span>${eventText(e)}</span>
           </li>`,
         )
         .join("")}

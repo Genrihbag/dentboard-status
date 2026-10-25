@@ -124,7 +124,9 @@ test("группы «Сертификат» на странице нет, и е�
 test("а слова, группы, фраза под группой и событие балансировщика — на месте", () => {
   const page = visible(render(HISTORY));
   assert.match(page, /вход работает через второй/);
-  assert.match(page, /<b>Балансировщик 2<\/b> не отвечает/);
+  // Событие свёрнутой группы — от имени группы: «Балансировщик 2» на странице нет (26.10.2026).
+  assert.match(page, /<b>Балансировщики<\/b> — один не отвечает/);
+  assert.doesNotMatch(page, /Балансировщик 2/);
   assert.match(page, /Резерв частично недоступен/);
 });
 
@@ -183,5 +185,10 @@ test("история ПРЕЖНЕГО кода (без onPage): сертифик
   const page = visible(render(OLD));
   assert.doesNotMatch(page, /ертификат/);
   assert.doesNotMatch(page, /\d\s*мс/);
-  assert.match(page, /Балансировщик 2/);
+  assert.match(page, /Балансировщики/);
+});
+
+test("одна строка свёрнутой группы не проверена — счёт «… из 2», а не «1 из 1»", () => {
+  const h = withBalancers(["up", "unknown"]);
+  assert.match(rowsOf(visible(render(h)), "balancers"), /1 из 2 работает/);
 });
