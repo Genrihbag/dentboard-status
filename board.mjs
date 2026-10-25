@@ -21,7 +21,7 @@
  * отправлялось бы новое табло, и лечение оказалось бы хуже болезни.
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { SLOW_MS } from "./avatar.mjs";
+import { icon, privateName } from "./layout.mjs";
 import { signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
 import { describeError } from "./error-detail.mjs";
 
@@ -54,27 +54,40 @@ export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 5)
  * цвет авы: «что считать медленным» обязано жить в одном месте, иначе табло и ава однажды скажут
  * разное об одном и том же прогоне, и правым будет выглядеть тот, на кого смотрят.
  */
-export function boardText(results, stamp, statusPage, slowMs = SLOW_MS) {
-  const rows = Object.entries(results).map(([name, r]) => {
-    if (!r.ok) {
-      // Причина, а не только значок: «не отвечает» и «отвечает пятисоткой» лечатся по-разному, а
-      // человек, открывший канал, решает, идти ли ему работать.
-      const why = r.status ? `код ${r.status}` : "не отвечает";
-      return `🔴 ${name} · ${why}`;
+export function boardText(view, stamp, statusPage) {
+  /**
+   * ПО ГРУППАМ, КАК НА СТРАНИЦЕ (25.10.2026), НО С ПРОВАЙДЕРАМИ И ПРИЧИНАМИ. Страница публичная и
+   * говорит только «работает / не работает»; табло читает владелец, и ему надо понимать, кто есть
+   * кто: «Балансировщик 2 (Yandex Cloud) · не отвечает (connect ETIMEDOUT)».
+   *
+   * Причина, а не только значок: «не отвечает» и «отвечает пятисоткой» лечатся по-разному, а
+   * человек, открывший канал, решает, идти ли ему работать.
+   */
+  const line = (r) => `${icon(r)} ${esc(privateName(r))} · ${esc(r.state === "up" ? r.detail : `${r.word} — ${r.detail}`)}`;
+  const blocks = view.groups.map((g) => {
+    // Группа из одной строки с тем же именем («Сервер и база», «Сертификат») — одной строкой с
+    // жирным именем: заголовок над единственной строкой того же имени — повтор.
+    if (g.rows.length === 1 && g.rows[0].name === g.title) {
+      const r = g.rows[0];
+      const text = r.state === "up" ? r.detail : `${r.word} — ${r.detail}`;
+      return [`${icon(r)} <b>${esc(g.title)}</b> · ${esc(text)}`, ...(g.summary ? [esc(g.summary)] : [])].join("\n");
     }
-    const slow = typeof r.ms === "number" && r.ms > slowMs;
-    return `${slow ? "🟡" : "✅"} ${name} · ${r.ms} мс`;
+    const out = [`<b>${esc(g.title)}</b>`, ...g.rows.map(line)];
+    if (g.summary) out.push(esc(g.summary));
+    return out.join("\n");
   });
 
   return [
     "<b>DentBoard — состояние</b>",
     `Проверено ${stamp} МСК`,
     "",
-    ...rows,
+    blocks.join("\n\n"),
     "",
     `<a href="${statusPage}">Подробности и история</a>`,
   ].join("\n");
 }
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 /**
  * ПРАВИТЬ ЛИ СЕЙЧАС. Тоже чистая функция, и это главное в файле: расписание правок проверяется
@@ -181,16 +194,18 @@ async function sendAndPin(token, chat, text) {
  * `edited` · `sent` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
  * «Telegram отказал» в одно значение, а они требуют разных действий.
  */
-export async function syncBoard(results, stamp, statusPage, { changed = false } = {}) {
+export async function syncBoard(view, stamp, statusPage, { changed = false } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
+  const nextText = boardText(view, stamp, statusPage);
   if (!token || !chat) {
-    console.log("[табло] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — табло не трогаем");
+    // Текст печатается: журнал частный, а подменный круг без него не показал бы, что встало бы в канал.
+    console.log("[табло] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — табло не трогаем. Текст:");
+    console.log(nextText.replace(/^/gm, "    │ "));
     return { acted: false, mode: "off", messageId: null, why: "не настроено" };
   }
 
   const prev = loadBoard();
-  const nextText = boardText(results, stamp, statusPage);
   const d = decideBoard({
     changed,
     lastEditedAt: prev.editedAt,

@@ -16,6 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { boardText, decideBoard } from "./board.mjs";
+import { evaluate } from "./layout.mjs";
 
 const STAMP = "30.08, 03:12";
 const PAGE = "https://status.dentboard.ru";
@@ -25,32 +26,61 @@ const agoMin = (m) => new Date(NOW - m * 60_000).toISOString();
 
 /* ── ТЕКСТ ───────────────────────────────────────────────────────────────────────────────── */
 
+/** Две группы: страница и пара балансировщиков с провайдерами — как в боевом списке. */
+const CONFIG = {
+  groups: [
+    { id: "users", title: "Для пользователей", kind: "http", rows: [{ id: "app", name: "Кабинет лаборатории" }] },
+    {
+      id: "balancers",
+      title: "Балансировщики",
+      kind: "balancer",
+      redundant: true,
+      say: { warn: "Один балансировщик недоступен — вход работает через второй." },
+      rows: [
+        { id: "lb1", name: "Балансировщик 1", label: "Selectel, СПб", ip: "136.234.13.100" },
+        { id: "lb2", name: "Балансировщик 2", label: "Yandex Cloud", ip: "153.51.113.60" },
+      ],
+    },
+  ],
+};
+const up = (ms = 180) => ({ ok: true, status: 200, ms });
+const text = (raw) => boardText(evaluate(CONFIG, raw, { slowMs: 1500 }), STAMP, PAGE);
+
 test("живая цель — галочка и её время ответа", () => {
-  const text = boardText({ API: { ok: true, ms: 180 } }, STAMP, PAGE);
-  assert.match(text, /✅ API · 180 мс/);
+  assert.match(text({ app: up(180), lb1: up(), lb2: up() }), /✅ Кабинет лаборатории · 180 мс/);
 });
 
 test("упавшая цель названа ПРИЧИНОЙ, а не только значком", () => {
   // «Не отвечает» и «отвечает пятисоткой» лечатся по-разному, и человек, открывший канал, решает
   // по этому различию, идти ли ему работать.
-  const nothing = boardText({ API: { ok: false, ms: 15000, status: 0 } }, STAMP, PAGE);
-  const five = boardText({ API: { ok: false, ms: 300, status: 502 } }, STAMP, PAGE);
-  assert.match(nothing, /🔴 API · не отвечает/);
-  assert.match(five, /🔴 API · код 502/);
+  const nothing = text({ app: { ok: false, status: 0, ms: 15000, error: "This operation was aborted (TimeoutError)" }, lb1: up(), lb2: up() });
+  const five = text({ app: { ok: false, status: 502, ms: 300 }, lb1: up(), lb2: up() });
+  assert.match(nothing, /🔴 Кабинет лаборатории · не отвечает — This operation was aborted/);
+  assert.match(five, /🔴 Кабинет лаборатории · не работает — код 502/);
 });
 
 test("медленная цель — 🟡; а быстрая НЕ 🟡", () => {
   // Парный отрицательный случай: без него правило «рисовать 🟡» прошло бы и в варианте «рисовать
   // 🟡 всегда», и табло стало бы жёлтым при полностью исправной системе.
-  const slow = boardText({ API: { ok: true, ms: 9000 } }, STAMP, PAGE);
-  const fast = boardText({ API: { ok: true, ms: 200 } }, STAMP, PAGE);
-  assert.match(slow, /🟡 API/);
-  assert.doesNotMatch(fast, /🟡/);
+  assert.match(text({ app: up(9000), lb1: up(), lb2: up() }), /🟡 Кабинет лаборатории/);
+  assert.doesNotMatch(text({ app: up(200), lb1: up(), lb2: up() }), /🟡/);
 });
 
 test("время проверки стои́т в тексте — иначе замёрзшее табло выглядит здоровым", () => {
-  const text = boardText({ API: { ok: true, ms: 180 } }, STAMP, PAGE);
-  assert.match(text, new RegExp(`Проверено ${STAMP.replace(/[.,]/g, "\\$&")} МСК`));
+  assert.match(text({ app: up(), lb1: up(), lb2: up() }), new RegExp(`Проверено ${STAMP.replace(/[.,]/g, "\$&")} МСК`));
+});
+
+test("в табло — группы, провайдер и адрес балансировщика, и фраза «вход работает через второй»", () => {
+  // Канал читает владелец: ему нужно «кто есть кто», которого на публичной странице нет намеренно.
+  const t = text({ app: up(), lb1: up(120), lb2: { ok: false, status: 0, ms: 15000, error: "connect ETIMEDOUT" } });
+  assert.match(t, /<b>Балансировщики<\/b>/);
+  assert.match(t, /✅ Балансировщик 1 \(Selectel, СПб, 136\.234\.13\.100\) · 120 мс/);
+  assert.match(t, /🔴 Балансировщик 2 \(Yandex Cloud, 153\.51\.113\.60\) · не отвечает — connect ETIMEDOUT/);
+  assert.match(t, /Один балансировщик недоступен — вход работает через второй\./);
+});
+
+test("ЗДЕСЬ ФРАЗЫ О ЗАПАСЕ БЫТЬ НЕ ДОЛЖНО: оба балансировщика живы", () => {
+  assert.doesNotMatch(text({ app: up(), lb1: up(), lb2: up() }), /через второй/);
 });
 
 /* ── РАСПИСАНИЕ ПРАВОК ───────────────────────────────────────────────────────────────────── */

@@ -46,20 +46,32 @@ async function probeOne(target, { until, attemptTimeoutMs, maxAttempts, headers 
     if (i > 0 && left < Math.min(MIN_RETRY_MS, attemptTimeoutMs)) break;
     const startedAt = Date.now();
     try {
-      const res = await fetch(target.url, {
-        redirect: "manual",
-        signal: AbortSignal.timeout(Math.min(attemptTimeoutMs, left)),
-        headers,
-      });
+      const signal = AbortSignal.timeout(Math.min(attemptTimeoutMs, left));
+      let status;
+      let body;
+      if (typeof target.attempt === "function") {
+        // Своя попытка (балансировщик по адресу — `door-probe.mjs`): те же повторы и тот же
+        // предел круга, что у обычной цели, — второй экземпляр логики повторов разошёлся бы молча.
+        ({ status, body } = await target.attempt({ signal, headers }));
+      } else {
+        const res = await fetch(target.url, { redirect: "manual", signal, headers });
+        status = res.status;
+        if (target.readBody) {
+          // Тело нужно готовности: в нём задержки базы и Redis.
+          body = await res.text().catch(() => undefined);
+        } else {
+          // Тело не нужно — нужен код. Без отмены незабранное тело держит соединение, а сервер,
+          // приславший заголовки и зависший на теле, держал бы его до конца процесса.
+          await res.body?.cancel().catch(() => {});
+        }
+      }
       const ms = Date.now() - startedAt;
-      // Тело не нужно — нужен код. Без отмены незабранное тело держит соединение, а сервер,
-      // приславший заголовки и зависший на теле, держал бы его до конца процесса.
-      await res.body?.cancel().catch(() => {});
       /* Перенаправление — законный ответ живого сервера: `dentboard.ru` уводит на www или https.
-         Считать его отказом значило бы поднимать тревогу на исправной системе. */
-      const ok = res.status === target.expect || (res.status >= 300 && res.status < 400);
-      attempts.push({ ok, status: res.status, ms });
-      if (ok) return { ok: true, status: res.status, ms, attempts: i + 1 };
+         Считать его отказом значило бы поднимать тревогу на исправной системе.
+         ⚠️ НО НЕ У ГОТОВНОСТИ (`strict`): там 3xx — это не «работает», а чужой ответ вместо нашего. */
+      const ok = status === target.expect || (!target.strict && status >= 300 && status < 400);
+      attempts.push({ ok, status, ms, body });
+      if (ok) return { ok: true, status, ms, body, attempts: i + 1 };
     } catch (e) {
       /* 🔴 ПРИЧИНА, А НЕ `e.message` — разбор в `error-detail.mjs`. Зависший сервер здесь даёт
          `TimeoutError`, отказавший — код сети; это два разных звонка хостеру. */
@@ -73,5 +85,5 @@ async function probeOne(target, { until, attemptTimeoutMs, maxAttempts, headers 
     return { ok: false, status: 0, ms: 0, error: "не опрошена: предел времени круга вышел", attempts: 0 };
   }
   const last = attempts[attempts.length - 1];
-  return { ok: false, status: last.status ?? 0, ms: last.ms, error: last.error, attempts: attempts.length };
+  return { ok: false, status: last.status ?? 0, ms: last.ms, body: last.body, error: last.error, attempts: attempts.length };
 }

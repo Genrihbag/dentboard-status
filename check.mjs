@@ -19,7 +19,21 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 // Аватар канала — ОТДЕЛЬНЫМ файлом, и не ради порядка: гистерезис и свод состояния должны
 // проверяться образцами, без сети и без Telegram. Внутри этого файла они были бы непроверяемы,
 // потому что он с первой строки читает цели и ходит наружу.
-import { syncAvatar, stateOf } from "./avatar.mjs";
+import { syncAvatar } from "./avatar.mjs";
+// Раскладка по группам (25.10.2026): строки, группы, свод, события, тексты — чистые функции,
+// проверяются образцами (`layout.test.mjs`) и подменным кругом (README, «Проверка путей отказа»).
+import {
+  LAYOUT,
+  evaluate,
+  publicView,
+  compatCurrent,
+  previousStates,
+  transitions,
+  alertTexts,
+} from "./layout.mjs";
+// Балансировщик по адресу мимо DNS и сертификат, который он отдаёт; прямой вопрос провайдерам DNS.
+import { getVia, readCert } from "./door-probe.mjs";
+import { probeDnsProvider } from "./dns-probe.mjs";
 // Табло — тоже отдельным файлом и по той же причине: расписание правок и текст обязаны
 // проверяться образцами, без сети и без Telegram.
 import { syncBoard, loadBoard } from "./board.mjs";
@@ -50,15 +64,22 @@ const LATENCY = "data/latency.json";
 /** Сколько событий храним. Не «всю историю»: файл читается целиком при каждом запуске. */
 const KEEP_EVENTS = 500;
 
-const { targets } = JSON.parse(readFileSync("targets.json", "utf8"));
+/**
+ * Список целей. `STATUS_TARGETS` — ТОЛЬКО для подменного круга (свои сервера на 127.0.0.1 вместо
+ * балансировщиков и DNS): пути отказа проверяются настоящим отказом настоящей пробы, а не
+ * подставленным результатом. На машине наблюдателя переменная не задаётся.
+ */
+const config = JSON.parse(readFileSync(process.env.STATUS_TARGETS ?? "targets.json", "utf8"));
 
 async function telegram(text, capMs = TELEGRAM_TIMEOUT_MS) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
     /* Отсутствие настройки — законное состояние (проверка работает, канал не подключён), но оно
-       обязано быть ВИДНО: «не настроено» и «отправлено» не должны выглядеть одинаково. */
-    console.log("телеграм не настроен (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — сообщение не отправлено");
+       обязано быть ВИДНО: «не настроено» и «отправлено» не должны выглядеть одинаково. Текст
+       печатается целиком: журнал частный, а без текста подменный круг не показал бы, ЧТО ушло бы. */
+    console.log("телеграм не настроен (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — сообщение не отправлено:");
+    console.log(text.replace(/^/gm, "    │ "));
     // `false`, а не пустой возврат: для пробы связи «не настроено» — такой же отрицательный
     // ответ, как отказ Telegram. Разница между ними названа строкой выше.
     return false;
@@ -94,71 +115,106 @@ const previous = existsSync(HISTORY)
   : { current: {}, events: [] };
 
 const now = new Date().toISOString();
-const results = {};
-let changed = false;
-const fell = [];
-const rose = [];
 
 let latency = existsSync(LATENCY) ? JSON.parse(readFileSync(LATENCY, "utf8")) : {};
 
-const probed = await probeAll(targets, {
-  headers: { "user-agent": "dentboard-status/1.0 (+https://github.com)" },
-});
+const groupOf = (kind) => config.groups.find((g) => g.kind === kind);
+const balancerGroup = groupOf("balancer");
+const balancers = balancerGroup?.rows ?? [];
+/** Чего ждём от DNS — адреса ОБОИХ балансировщиков. Второго списка нет: разъехался бы с первым. */
+const expectIps = [...new Set(balancers.map((b) => b.ip))].sort();
 
-for (const [i, target] of targets.entries()) {
-  const r = probed[i];
-  // ⚠️ КОПИМ ТОЛЬКО УСПЕШНЫЕ. У неудачной пробы `ms` — время ДО ОТКАЗА, то есть чаще всего
-  // таймаут: подмешав его, мы получили бы «медиана выросла до 15 секунд» там, где цель просто
-  // лежала, и «медленно» перестало бы отличаться от «лежит».
-  if (r.ok) latency = appendSample(latency, target.name, r.ms);
-  const stat = summarise(latency[target.name]);
-  results[target.name] = {
-    ok: r.ok,
-    status: r.status,
-    ms: r.ms,
-    checkedAt: now,
-    url: target.url,
-    // Свод по накопленному окну — ради него всё и заведено: порог «медленно» надо НАЗНАЧАТЬ ПО
-    // ЗАМЕРУ, а до 31.08.2026 замеры не сохранялись вовсе и назначать было не по чему.
-    latency: stat,
-  };
-  const was = previous.current?.[target.name]?.ok;
-  console.log(`${r.ok ? "✅" : "🔴"} ${target.name}: ${r.status || r.error} (${r.ms} мс, попыток ${r.attempts})`);
-
-  if (was !== undefined && was !== r.ok) {
-    changed = true;
-    (r.ok ? rose : fell).push(target.name);
-    previous.events.unshift({
-      at: now,
-      target: target.name,
-      state: r.ok ? "поднялся" : "упал",
-      status: r.status,
-      error: r.error ?? null,
-    });
+/**
+ * ВСЕ ПРОБЫ — РАЗОМ, в одном пределе круга (`budget.mjs`, авария 23.10.2026). HTTP-цели и
+ * балансировщики идут через `probeAll` (повторы и предел общие), DNS и сертификат — со своими
+ * короткими таймаутами (3 с на вопрос, 10 с на соединение), параллельно с ними.
+ */
+const httpTargets = [];
+for (const g of config.groups) {
+  for (const row of g.rows) {
+    if (g.kind === "http") httpTargets.push({ id: row.id, url: row.url, expect: row.expect });
+    if (g.kind === "ready") httpTargets.push({ id: row.id, url: row.url, expect: row.expect, readBody: true, strict: true });
+    if (g.kind === "balancer") {
+      httpTargets.push({
+        id: row.id,
+        expect: 200,
+        strict: true,
+        attempt: ({ signal, headers }) => getVia(row.ip, g.host, g.path, { signal, headers, port: row.port ?? 443 }),
+      });
+    }
   }
-  /* Первый в жизни запуск состоянием не считается: иначе он поднял бы тревогу «всё упало» на
-     пустой истории, а тревога, начавшаяся с ложной, обесценивает все следующие. */
-  if (was === undefined) changed = true;
+}
+const dnsGroup = groupOf("dns");
+const certGroup = groupOf("cert");
+
+const [probed, dnsResults, certResults] = await Promise.all([
+  probeAll(httpTargets, { headers: { "user-agent": "dentboard-status/1.0 (+https://github.com)" } }),
+  Promise.all((dnsGroup?.rows ?? []).map((row) => probeDnsProvider(row.servers, dnsGroup.query, expectIps))),
+  Promise.all(
+    certGroup
+      ? balancers.map(async (b) => ({ door: b.id, ...(await readCert(b.ip, certGroup.host, { port: b.port ?? 443 })) }))
+      : [],
+  ),
+]);
+
+const raw = {};
+httpTargets.forEach((t, i) => (raw[t.id] = probed[i]));
+(dnsGroup?.rows ?? []).forEach((row, i) => (raw[row.id] = dnsResults[i]));
+for (const row of certGroup?.rows ?? []) raw[row.id] = { perDoor: certResults };
+
+const view = evaluate(config, raw);
+
+// ⚠️ КОПИМ ТОЛЬКО УСПЕШНЫЕ. У неудачной пробы `ms` — время ДО ОТКАЗА, то есть чаще всего таймаут:
+// подмешав его, мы получили бы «медиана выросла до 15 секунд» там, где цель просто лежала, и
+// «медленно» перестало бы отличаться от «лежит». Ключ — имя строки: у страниц оно прежнее, и
+// накопленное окно переживает смену раскладки.
+const timed = view.groups.flatMap((g) => g.rows).filter((r) => ["http", "balancer", "ready"].includes(r.kind));
+for (const r of timed) if (r.state === "up" && typeof r.ms === "number") latency = appendSample(latency, r.name, r.ms);
+// Окна снятых целей («API», «API и его зависимости») не копим вечно: их больше никто не пишет.
+latency = Object.fromEntries(Object.entries(latency).filter(([k]) => timed.some((r) => r.name === k)));
+// Свод по накопленному окну — ради него всё и заведено: порог «медленно» надо НАЗНАЧАТЬ ПО ЗАМЕРУ.
+const latencyOf = (r) => (["http", "balancer", "ready"].includes(r.kind) ? summarise(latency[r.name]) : undefined);
+
+// Журнал круга — ЧАСТНЫЙ (journalctl на машине наблюдателя), поэтому с провайдером и причиной.
+for (const g of view.groups) {
+  for (const r of g.rows) {
+    const mark = r.state === "down" ? "🔴" : r.state === "warn" ? "🟡" : r.state === "unknown" ? "⚪" : "✅";
+    console.log(`${mark} ${g.title} · ${r.label ? `${r.name} (${r.label})` : r.name}: ${r.word} — ${r.detail}`);
+  }
 }
 
 /**
+ * Смены состояния. Первый в жизни запуск и первый круг новой раскладки событиями не считаются
+ * (`previousStates`): иначе на пустой истории поднялась бы тревога «всё упало», а при выкате —
+ * поток «работает: …» по строкам, которых раньше не было. Тревога, начавшаяся с ложной,
+ * обесценивает все следующие.
+ */
+const prevStates = previousStates(previous, config);
+const moved = transitions(view, prevStates, now);
+const firstOfLayout = previous.layout !== LAYOUT;
+const changed = moved.events.length > 0 || firstOfLayout;
+
+/**
  * 🔴 СВОД ПУБЛИКУЕТСЯ, А НЕ СЧИТАЕТСЯ ПОТРЕБИТЕЛЕМ. Точку состояния в шапке кабинетов рисует
- * фронт DentBoard, забирая этот файл с `raw.githubusercontent.com`. Посчитай он «зелёный/жёлтый/
- * красный» сам — правило существовало бы в двух экземплярах и разошлось бы молча: на странице
- * жёлтый, в кабинете зелёный, и никто не знает, кто прав.
+ * фронт DentBoard, забирая этот файл. Посчитай он «зелёный/жёлтый/красный» сам — правило
+ * существовало бы в двух экземплярах и разошлось бы молча.
  *
- * Берётся ТА ЖЕ `stateOf`, что решает цвет аватара канала. Один master на сущность: смысл
- * «что считать сбоем» живёт в одном месте с доводами (почему красная только когда лежит всё,
- * почему медленный ответ приравнен к частичному отказу).
+ * ⚠️ СОВМЕСТИМОСТЬ С КАБИНЕТАМИ (ztl-lab `packages/ui/src/lib/status-snapshot.ts`): тот читает
+ * `overall`, `updatedAt` и `current[имя].ok/.ms`. Все три остались, смысл прежний; устройство
+ * целиком — новым полем `groups`, которого прежний читатель не видит и видеть не обязан.
  *
  * ⚠️ БЕЗ ГИСТЕРЕЗИСА, в отличие от аватара. Там задержка в два прогона оправдана ценой: смена
- * фото оставляет запись в ленте канала. Здесь цены нет — точка меняет цвет молча, и задерживать
- * её значило бы показывать зелёное поверх уже известного отказа.
+ * фото оставляет запись в ленте канала. Здесь цены нет — точка меняет цвет молча.
+ *
+ * ⚠️ ФАЙЛ ПУБЛИЧНЫЙ: провайдеров, адресов и подробностей в нём нет (`publicView`, `redact`).
  */
+const urls = Object.fromEntries(config.groups.flatMap((g) => g.rows).filter((r) => r.url).map((r) => [r.id, r.url]));
 const history = {
-  current: results,
-  overall: stateOf(results),
-  events: previous.events.slice(0, KEEP_EVENTS),
+  layout: LAYOUT,
+  overall: view.overall,
+  groups: publicView(view, latencyOf),
+  current: compatCurrent(view, { now, urls, latencyOf }),
+  events: [...moved.events, ...(previous.events ?? [])].slice(0, KEEP_EVENTS),
   updatedAt: now,
 };
 mkdirSync("data", { recursive: true });
@@ -217,12 +273,12 @@ const stamp = new Date().toLocaleString("ru-RU", {
  * доказывает только то, что работает сам режим.
  */
 if (process.env.TEST_MESSAGE === "true") {
-  const names = Object.entries(results);
-  const down = names.filter(([, r]) => !r.ok).map(([n]) => n);
+  const rows = view.groups.flatMap((g) => g.rows).filter((r) => r.state !== "unknown");
+  const bad = rows.filter((r) => r.state !== "up").map((r) => r.name);
   const state =
-    down.length === 0
-      ? `Все сервисы отвечают (${names.length} из ${names.length}).`
-      : `Не отвечают: ${down.join(", ")}.`;
+    bad.length === 0
+      ? `Всё работает (${rows.length} из ${rows.length}).`
+      : `Есть проблемы: ${bad.join(", ")}.`;
   const sent = await telegram(
     `🔔 <b>Проверка</b>\n${stamp} МСК\n${state}\n<a href="${STATUS_PAGE}">Страница состояния</a>`,
   );
@@ -243,16 +299,8 @@ if (process.env.TEST_MESSAGE === "true") {
 const ALERT_RESERVE_MS = 2_000;
 const alertCap = () => Math.max(TELEGRAM_TIMEOUT_MS, remainingMs() - ALERT_RESERVE_MS);
 
-if (fell.length > 0) {
-  await telegram(
-    `🔴 <b>Сбой: ${fell.join(", ")}</b>\n${stamp} МСК · работаем над восстановлением.\n` +
-      `<a href="${STATUS_PAGE}">Подробности</a>`,
-    alertCap(),
-  );
-}
-if (rose.length > 0) {
-  await telegram(`✅ <b>Работает: ${rose.join(", ")}</b>\n${stamp} МСК`, alertCap());
-}
+// Тексты — в `layout.mjs` (проверяются образцами): по сообщению на «сбой», «внимание», «работает».
+for (const text of alertTexts(moved, view, stamp, STATUS_PAGE)) await telegram(text, alertCap());
 
 /**
  * АВАТАР КАНАЛА — ПОСЛЕ записи истории и ПОСЛЕ сообщений.
@@ -265,7 +313,7 @@ if (rose.length > 0) {
  * Слив их в одно значение означал бы коммит «сменилось состояние» там, где сменилась только
  * подтверждённость гистерезиса.
  */
-const avatar = await syncAvatar(results, { protectedIds: [loadBoard().messageId] });
+const avatar = await syncAvatar(view.overall, { protectedIds: [loadBoard().messageId] });
 console.log(`аватар: наблюдаем «${avatar.observed}», на канале «${avatar.state ?? "—"}»${avatar.changed ? " (сменили)" : ""}`);
 
 /**
@@ -279,7 +327,7 @@ console.log(`аватар: наблюдаем «${avatar.observed}», на ка�
  * сообщение с номером `id - 1` вслепую, и с появлением табла этим соседом может оказаться оно
  * само. Довод целиком — в `avatar.mjs`.
  */
-const board = await syncBoard(results, stamp, STATUS_PAGE, { changed });
+const board = await syncBoard(view, stamp, STATUS_PAGE, { changed });
 console.log(`табло: ${board.mode}${board.messageId ? ` (№${board.messageId})` : ""} — ${board.why}`);
 
 /* Признак «коммитить ли» отдаётся оболочке ЯВНО, а не выводится ею из текста вывода: разбор
@@ -301,4 +349,11 @@ writeFileSync(
   `changed=${changed}\navatar=${avatar.persisted === true}\n`,
   { flag: "a" },
 );
-console.log(`итог: целей ${targets.length}, недоступно ${Object.values(results).filter((r) => !r.ok).length}, состояние менялось: ${changed}`);
+{
+  const rows = view.groups.flatMap((g) => g.rows);
+  const count = (s) => rows.filter((r) => r.state === s).length;
+  console.log(
+    `итог: строк ${rows.length} (работает ${count("up")}, внимание ${count("warn")}, не работает ${count("down")}, не проверено ${count("unknown")}), ` +
+      `свод «${view.overall}», событий ${moved.events.length}${firstOfLayout ? " (первый круг раскладки — по новым строкам сообщений нет)" : ""}`,
+  );
+}

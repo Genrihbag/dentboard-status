@@ -24,9 +24,39 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const when = (iso) =>
   new Date(iso).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", dateStyle: "short", timeStyle: "short" });
 
-const services = Object.entries(h.current);
-const down = services.filter(([, r]) => !r.ok);
-const allOk = down.length === 0;
+/**
+ * ГРУППЫ (25.10.2026) — «Для пользователей», «Балансировщики», «DNS», «Сервер и база»,
+ * «Сертификат». Порядок и тексты — из `history.json`, а он из `targets.json`: страница их не
+ * придумывает, иначе подпись на странице и строка в канале разошлись бы молча.
+ *
+ * ⚠️ ПРЕЖНИЙ ФАЙЛ (без `groups`) НЕ РОНЯЕТ СБОРКУ. Если круг упал до записи истории, на диске
+ * остаётся файл прежней раскладки — тогда строки берутся из `current` одной группой. Упавшая
+ * сборка страницы в аварию — худшее из возможного: человек пришёл узнать, что случилось.
+ */
+const groups = Array.isArray(h.groups)
+  ? h.groups
+  : [
+      {
+        id: "legacy",
+        title: "Сервисы",
+        state: Object.values(h.current ?? {}).every((r) => r.ok) ? "up" : "warn",
+        summary: null,
+        rows: Object.entries(h.current ?? {}).map(([name, r], i) => ({
+          id: `legacy-${i}`,
+          name,
+          state: r.ok ? "up" : "down",
+          word: r.ok ? "работает" : "не отвечает",
+          value: r.ok && typeof r.ms === "number" ? `${r.ms} мс` : null,
+        })),
+      },
+    ];
+const overall = ["up", "slow", "down"].includes(h.overall) ? h.overall : "unknown";
+const allRows = groups.flatMap((g) => g.rows);
+
+/** Заголовок и подпись по своду — те же слова, что у точки в шапке кабинетов (ztl-lab `HEADLINE`). */
+const HEADLINE = { up: "Все сервисы работают", slow: "Есть проблемы", down: "Сервисы недоступны", unknown: "Состояние неизвестно" };
+const GROUP_WORD = { up: "Работает", warn: "Работает частично", down: "Не работает", unknown: "Не проверено" };
+const ROW_CLASS = { up: "is-up", warn: "is-warn", down: "is-down", unknown: "is-unknown" };
 
 /** Знак DentBoard — те же пути, что в `apps/staff-app/src/components/brand.tsx`. */
 const MARK = `<svg viewBox="0 0 566.91 510.23" class="mark" role="img" aria-label="DentBoard" fill="none"><path d="M510.21,340.15A113.36,113.36,0,0,1,396.85,453.52H248.32a151,151,0,0,0,73.87-56.64h74.66a56.73,56.73,0,0,0,0-113.46H256.54A70.89,70.89,0,0,1,326,226.77H395.1l1,0h1.46a56.73,56.73,0,0,0-.73-113.45H322.18a151,151,0,0,0-73.92-56.65H396.85A113.37,113.37,0,0,1,471.8,255.11,113,113,0,0,1,510.21,340.15Z" fill="hsl(var(--primary))"/><path d="M283.4,196a85,85,0,0,0-85-82.58h-85V311.83a85,85,0,0,0,170,0l0,0V292h56.69v19.85A141,141,0,0,1,317.28,389l-2.09,3a143.37,143.37,0,0,1-69.7,53.45v0A141.85,141.85,0,0,1,56.69,311.81V56.69H198.42a141.56,141.56,0,0,1,47,8v0a143.34,143.34,0,0,1,69.75,53.46l2.15,3.11A141,141,0,0,1,340.13,196c0,.82,0,1.64,0,2.46v19.85H326a79,79,0,0,0-42.58,12.46Z" fill="hsl(var(--foreground))"/><path d="M315.18,118.17l2.15,3.11a142.09,142.09,0,0,0-71.89-56.61v0A143.34,143.34,0,0,1,315.18,118.17ZM245.49,445.5v0A142.16,142.16,0,0,0,317.28,389l-2.09,3A143.37,143.37,0,0,1,245.49,445.5Z" fill="hsl(var(--foreground))"/></svg>`;
@@ -34,17 +64,52 @@ const MARK = `<svg viewBox="0 0 566.91 510.23" class="mark" role="img" aria-labe
 const OK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>`;
 const BAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>`;
 
-const rows = services
-  .map(
-    ([name, r], i) => `
-        <li class="row nf-in" style="animation-delay:${120 + i * 45}ms" data-target="${esc(name)}">
-          <span class="row-name">${esc(name)}</span>
-          <span class="row-state ${r.ok ? "is-up" : "is-down"}">
-            <span class="row-ms">${r.ok && typeof r.ms === "number" ? `${r.ms} мс` : ""}</span>
-            <span class="dot" aria-hidden="true"></span><span class="row-word">${r.ok ? "работает" : "не отвечает"}</span>
-          </span>
-        </li>`,
-  )
+const WARN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>`;
+
+/**
+ * ОДНА КАРТОЧКА НА ГРУППУ. В шапке — состояние группы СЛОВОМ, но только у групп из нескольких
+ * строк и только когда не всё в порядке: «Работает» над тремя зелёными строками — повтор, а
+ * «Работает частично» над балансировщиками — ровно то, что раньше не было видно. Под строками —
+ * одна фраза, что это значит для человека («вход работает через второй»).
+ *
+ * ⚠️ ПРОВАЙДЕРОВ, ГОРОДОВ И АДРЕСОВ ЗДЕСЬ НЕТ (решение владельца 25.10.2026): «Балансировщик 1»,
+ * «DNS 2» — и только «работает / не работает». Подробности — в канале.
+ */
+let delay = 100;
+const cards = groups
+  .map((g) => {
+    const multi = g.rows.length > 1;
+    const showState = multi && g.state !== "up";
+    // Группа из одной строки с тем же именем («Сервер и база», «Сертификат») — без шапки: заголовок
+    // над единственной строкой того же имени — тот самый дубль, на который жаловался владелец.
+    const headless = g.rows.length === 1 && g.rows[0].name === g.title;
+    const head = headless
+      ? ""
+      : `
+    <div class="card-head">
+      <h2 class="card-title">${esc(g.title)}</h2>
+      <span class="group-state ${ROW_CLASS[g.state] ?? "is-unknown"}" data-group-state${multi ? "" : " data-single"}${showState ? "" : " hidden"}>${esc(GROUP_WORD[g.state] ?? "")}</span>
+    </div>`;
+    const card = `
+  <section class="card nf-in" style="animation-delay:${delay}ms" data-group="${esc(g.id)}">${head}
+    <ul>${g.rows
+      .map(
+        (r) => `
+      <li class="row" data-row="${esc(r.id)}">
+        <span class="row-name">${esc(r.name)}</span>
+        <span class="row-state ${ROW_CLASS[r.state] ?? "is-unknown"}">
+          <span class="row-ms${r.slow ? " is-slow" : ""}">${r.value ? esc(r.value) : ""}</span>
+          <span class="dot" aria-hidden="true"></span><span class="row-word">${esc(r.word)}</span>
+        </span>
+      </li>`,
+      )
+      .join("")}
+    </ul>
+    <p class="group-note ${ROW_CLASS[g.state] ?? "is-unknown"}" data-group-note${g.summary ? "" : " hidden"}>${g.summary ? esc(g.summary) : ""}</p>
+  </section>`;
+    delay += 40;
+    return card;
+  })
   .join("");
 
 /**
@@ -53,19 +118,26 @@ const rows = services
  * занимает экран; когда сбой случится, раздел появится сам и будет замечен именно потому, что его
  * не было.
  */
+/**
+ * Фраза события. У событий новой раскладки она записана кругом (`phrase`); у прежних — только
+ * «упал / поднялся», и они читаются как раньше: переписывать запись о прошлом под новую раскладку
+ * значило бы подделывать её.
+ */
+const phrase = (e) => (e.phrase ? e.phrase : e.state === "упал" ? "перестал отвечать" : "снова отвечает");
+const events = Array.isArray(h.events) ? h.events : [];
 const historyBlock =
-  h.events.length === 0
+  events.length === 0
     ? ""
     : `
-  <section class="card nf-in" style="animation-delay:340ms">
-    <h2 class="card-title">Последние события</h2>
+  <section class="card nf-in" style="animation-delay:${delay}ms">
+    <div class="card-head"><h2 class="card-title">Последние события</h2></div>
     <ul>
-      ${h.events
+      ${events
         .slice(0, 12)
         .map(
           (e) => `<li class="event">
             <span class="event-time">${when(e.at)}</span>
-            <span><b>${esc(e.target)}</b> ${e.state === "упал" ? "перестал отвечать" : "снова отвечает"}</span>
+            <span><b>${esc(e.target)}</b> ${esc(phrase(e))}</span>
           </li>`,
         )
         .join("")}
@@ -88,7 +160,7 @@ writeFileSync(
 <meta name="description" content="Состояние сервисов DentBoard. Проверка снаружи каждую минуту.">
 <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f1f5f9" media="(prefers-color-scheme: light)">
-<title>${allOk ? "Все сервисы работают" : "Есть недоступные сервисы"} — DentBoard</title>
+<title>${HEADLINE[overall]} — DentBoard</title>
 <!-- Значки — те же файлы, что у сайта. Вкладка без знака читается как чужая страница, а сюда
      приходят ровно тогда, когда сомневаются, туда ли попали. -->
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -110,6 +182,10 @@ writeFileSync(
     --border: 214 32% 91%;
     --success: 142 66% 31%;
     --destructive: 0 72% 51%;
+    /* Жёлтое — «работает частично» (25.10.2026). Точка — --warning, текст — --warning-strong:
+       сам warning на белом даёт ~2,3:1 при норме 4,5:1, поэтому у продукта для текста второй тон. */
+    --warning: 35 92% 48%;
+    --warning-strong: 35 92% 32%;
     --radius: 0.625rem;
   }
   @media (prefers-color-scheme: dark) {
@@ -126,6 +202,8 @@ writeFileSync(
          СВОИ значения, а не инверсию дневных — правило продукта. */
       --success: 142 60% 45%;
       --destructive: 0 72% 60%;
+      --warning: 35 90% 55%;
+      --warning-strong: 35 90% 62%;
     }
   }
 
@@ -181,18 +259,30 @@ writeFileSync(
   .to-site:hover { border-color: hsl(var(--primary) / .6); color: hsl(var(--primary)); }
 
   .hero { text-align: center; margin-bottom: 2.5rem; }
-  .hero-icon { width: 3rem; height: 3rem; margin: 0 auto .875rem; display: block; }
-  .hero.ok .hero-icon { color: hsl(var(--success)); }
-  .hero.bad .hero-icon { color: hsl(var(--destructive)); }
+  .hero-icon { width: 3rem; height: 3rem; margin: 0 auto .875rem; display: none; }
+  /* Три значка лежат в разметке, видим один — по классу свода. Живое обновление меняет класс, а
+     не вставляет разметку: значки не живут вторым экземпляром в скрипте. */
+  .hero.up .hero-icon.i-up, .hero.unknown .hero-icon.i-up { display: block; color: hsl(var(--success)); }
+  .hero.unknown .hero-icon.i-up { color: hsl(var(--muted-foreground)); }
+  .hero.slow .hero-icon.i-slow { display: block; color: hsl(var(--warning)); }
+  .hero.down .hero-icon.i-down { display: block; color: hsl(var(--destructive)); }
   h1 { font-size: clamp(1.5rem, 5vw, 2rem); font-weight: 600; letter-spacing: -.025em; margin: 0 0 .5rem; }
   .hero p { margin: 0; color: hsl(var(--muted-foreground)); font-size: .9375rem; }
 
   .card { border: 1px solid hsl(var(--border)); border-radius: var(--radius);
           background: hsl(var(--card)); overflow: hidden; }
   .card + .card { margin-top: 1rem; }
-  .card-title { margin: 0; padding: .75rem 1.125rem; font-size: .75rem; font-weight: 600;
-                text-transform: uppercase; letter-spacing: .05em; color: hsl(var(--muted-foreground));
-                border-bottom: 1px solid hsl(var(--border)); }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+               padding: .75rem 1.125rem; border-bottom: 1px solid hsl(var(--border)); }
+  .card-title { margin: 0; font-size: .75rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: .05em; color: hsl(var(--muted-foreground)); }
+  .group-state { font-size: .75rem; font-weight: 600; white-space: nowrap; }
+  .group-state[hidden], .group-note[hidden] { display: none; }
+  .group-state.is-warn, .group-note.is-warn { color: hsl(var(--warning-strong)); }
+  .group-state.is-down, .group-note.is-down { color: hsl(var(--destructive)); }
+  /* Что это значит для человека — одной фразой под строками, на тонированной подложке. */
+  .group-note { margin: 0; padding: .625rem 1.125rem; font-size: .8125rem; line-height: 1.45;
+                border-top: 1px solid hsl(var(--border)); background: hsl(var(--muted) / .6); }
 
   ul { list-style: none; margin: 0; padding: 0; }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .875rem 1.125rem; }
@@ -202,7 +292,9 @@ writeFileSync(
      дальтонизме и в ч/б печати. */
   .row-state { display: inline-flex; align-items: center; gap: .5rem; font-size: .875rem; white-space: nowrap; }
   .row-state.is-up { color: hsl(var(--success)); }
+  .row-state.is-warn { color: hsl(var(--warning-strong)); }
   .row-state.is-down { color: hsl(var(--destructive)); }
+  .row-state.is-unknown { color: hsl(var(--muted-foreground)); }
   /**
    * ВРЕМЯ ОТВЕТА — ПРИГЛУШЁННЫМ И БЕЗ ПОЯСНЕНИЙ (возвращено 29.08.2026 по просьбе владельца).
    *
@@ -219,6 +311,9 @@ writeFileSync(
    * есть совсем другую величину под тем же видом.
    */
   .row-ms { color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; font-size: .8125rem; }
+  /* Ответила, но медленнее порога — число тем же жёлтым, что и «работает частично»: строка при этом
+     работает, и слово остаётся «работает». */
+  .row-ms.is-slow { color: hsl(var(--warning-strong)); }
   .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; flex: none; }
 
   .event { display: flex; gap: .875rem; padding: .6875rem 1.125rem; font-size: .875rem; }
@@ -238,6 +333,8 @@ writeFileSync(
 
   @media (max-width: 30rem) {
     .event { flex-direction: column; gap: .125rem; }
+    .row { padding: .8125rem 1rem; gap: .75rem; }
+    .card-head, .group-note { padding-left: 1rem; padding-right: 1rem; }
   }
 </style>
 </head>
@@ -253,19 +350,16 @@ writeFileSync(
     <a class="to-site" href="https://dentboard.ru">На сайт</a>
   </header>
 
-  <div class="hero ${allOk ? "ok" : "bad"} nf-in" style="animation-delay:60ms">
-    <span class="hero-icon">${allOk ? OK_ICON : BAD_ICON}</span>
-    <h1>${allOk ? "Все сервисы работают" : "Есть недоступные сервисы"}</h1>
+  <div class="hero ${overall} nf-in" style="animation-delay:60ms" data-hero>
+    <span class="hero-icon i-up">${OK_ICON}</span><span class="hero-icon i-slow">${WARN_ICON}</span><span class="hero-icon i-down">${BAD_ICON}</span>
+    <h1 data-headline>${HEADLINE[overall]}</h1>
     <p data-checked>${
-      allOk
+      overall === "up" || overall === "unknown"
         ? `Проверено ${when(h.updatedAt)}`
-        : `Мы знаем о сбое и уже занимаемся им. Проверено ${when(h.updatedAt)}`
+        : `Мы знаем о проблеме и уже занимаемся ею. Проверено ${when(h.updatedAt)}`
     }</p>
   </div>
-
-  <section class="card nf-in" style="animation-delay:100ms">
-    <ul>${rows}</ul>
-  </section>
+${cards}
 ${historyBlock}
 </div>
 <script>
@@ -276,10 +370,11 @@ ${historyBlock}
  * две — то есть человек видел числа старше данных вдвое и справедливо считал, что «пинги не
  * обновляются». Владелец заметил это 29.08.2026 в первый же день после переезда.
  *
- * ⚠️ ОБНОВЛЯЕМ ЗНАЧЕНИЯ, А НЕ ПЕРЕРИСОВЫВАЕМ РАЗМЕТКУ. Строки ищутся по «data-target» — имени
- * цели, — поэтому порядок и оформление остаются делом сервера, а скрипт трогает ровно три вещи:
- * время ответа, слово, подпись о замере. Перерисуй он вёрстку, любая правка дизайна ломала бы
- * скрипт молча.
+ * ⚠️ ОБНОВЛЯЕМ ЗНАЧЕНИЯ, А НЕ ПЕРЕРИСОВЫВАЕМ РАЗМЕТКУ. Строки ищутся по «data-row», группы — по
+ * «data-group» (id из targets.json), поэтому порядок и оформление остаются делом сервера, а скрипт
+ * трогает только значения: число, слово, цвет строки, состояние и фразу группы, свод и подпись о
+ * замере. Перерисуй он вёрстку, любая правка дизайна ломала бы скрипт молча. Новая строка, которой
+ * нет в разметке, появится со следующей перезагрузкой (раз в пять минут) — не раньше.
  *
  * ⚠️ ОТКАЗ ЗАПРОСА НИЧЕГО НЕ МЕНЯЕТ. Не сумев спросить, мы НЕ знаем состояния — и показывать в
  * этот момент «всё упало» значило бы врать о наблюдаемом из-за собственной сетевой заминки.
@@ -294,28 +389,54 @@ ${historyBlock}
     return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear() +
       ", " + pad(d.getHours()) + ":" + pad(d.getMinutes());
   }
+  var HEADLINE = ${JSON.stringify(HEADLINE)};
+  var GROUP_WORD = ${JSON.stringify(GROUP_WORD)};
+  var CLS = ${JSON.stringify(ROW_CLASS)};
   function apply(h) {
-    var rows = document.querySelectorAll("[data-target]");
-    for (var i = 0; i < rows.length; i++) {
-      var li = rows[i];
-      var r = (h.current || {})[li.getAttribute("data-target")];
-      if (!r) continue;
-      var state = li.querySelector(".row-state");
-      var ms = li.querySelector(".row-ms");
-      var word = li.querySelector(".row-word");
-      if (state) state.className = "row-state " + (r.ok ? "is-up" : "is-down");
-      // Время показываем ТОЛЬКО у ответившей цели: у не ответившей это длительность ожидания до
-      // отказа — другая величина под тем же именем.
-      if (ms) ms.textContent = r.ok && typeof r.ms === "number" ? r.ms + " мс" : "";
-      if (word) word.textContent = r.ok ? "работает" : "не отвечает";
+    // Файл прежней раскладки (без групп) — не наш формат: молчим и оставляем, что есть.
+    if (!h || !h.groups || !h.groups.length) return;
+    for (var g = 0; g < h.groups.length; g++) {
+      var grp = h.groups[g];
+      var card = document.querySelector('[data-group="' + grp.id + '"]');
+      if (!card) continue;
+      var gs = card.querySelector("[data-group-state]");
+      if (gs) {
+        gs.className = "group-state " + (CLS[grp.state] || "is-unknown");
+        gs.textContent = GROUP_WORD[grp.state] || "";
+        gs.hidden = gs.hasAttribute("data-single") || grp.state === "up";
+      }
+      var note = card.querySelector("[data-group-note]");
+      if (note) {
+        note.className = "group-note " + (CLS[grp.state] || "is-unknown");
+        note.textContent = grp.summary || "";
+        note.hidden = !grp.summary;
+      }
+      for (var i = 0; i < grp.rows.length; i++) {
+        var r = grp.rows[i];
+        var li = card.querySelector('[data-row="' + r.id + '"]');
+        if (!li) continue;
+        var state = li.querySelector(".row-state");
+        var ms = li.querySelector(".row-ms");
+        var word = li.querySelector(".row-word");
+        if (state) state.className = "row-state " + (CLS[r.state] || "is-unknown");
+        // Число — то, что положил круг (поле value): у не ответившей строки его нет, потому что там
+        // оно означало бы длительность ожидания до отказа — другую величину под тем же видом.
+        if (ms) { ms.textContent = r.value || ""; ms.className = "row-ms" + (r.slow ? " is-slow" : ""); }
+        if (word) word.textContent = r.word || "";
+      }
     }
+    var overall = HEADLINE[h.overall] ? h.overall : "unknown";
+    var hero = document.querySelector("[data-hero]");
+    if (hero) hero.className = "hero " + overall;
+    var hl = document.querySelector("[data-headline]");
+    if (hl) hl.textContent = HEADLINE[overall];
+    document.title = HEADLINE[overall] + " — DentBoard";
     var p = document.querySelector("[data-checked]");
     var stamp = when(h.updatedAt);
     if (p && stamp) {
-      var down = Object.keys(h.current || {}).filter(function (k) { return !h.current[k].ok; });
-      p.textContent = down.length === 0
+      p.textContent = overall === "up" || overall === "unknown"
         ? "Проверено " + stamp
-        : "Мы знаем о сбое и уже занимаемся им. Проверено " + stamp;
+        : "Мы знаем о проблеме и уже занимаемся ею. Проверено " + stamp;
     }
   }
   function tick() {
@@ -334,5 +455,5 @@ ${historyBlock}
 );
 
 console.log(
-  `страница собрана: сервисов ${services.length}, недоступно ${down.length}, событий в истории ${h.events.length}`,
+  `страница собрана: групп ${groups.length}, строк ${allRows.length}, не в порядке ${allRows.filter((r) => r.state !== "up").length}, свод «${overall}», событий в истории ${events.length}`,
 );
