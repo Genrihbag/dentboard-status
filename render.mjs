@@ -51,6 +51,19 @@ const groups = Array.isArray(h.groups)
       },
     ];
 const overall = ["up", "slow", "down"].includes(h.overall) ? h.overall : "unknown";
+/**
+ * ОГОВОРКА К ЗЕЛЁНОМУ (25.10.2026): лёг один из двух балансировщиков или DNS, сертификату меньше
+ * 14 дней — людям всё работает. Заголовок остаётся «Все сервисы работают», под ним — одна фраза.
+ * «Мы знаем о проблеме и уже занимаемся» здесь читалось бы клиентом как авария, которой нет.
+ */
+const notice = typeof h.notice === "string" && h.notice ? h.notice : null;
+/** Подпись под заголовком. Скрипт живого обновления получает ЭТУ ЖЕ функцию её исходником. */
+function subtitle(state, note, stamp) {
+  if (state === "slow" || state === "down") return `Мы знаем о проблеме и уже занимаемся ею. Проверено ${stamp}`;
+  // Оговорка — своей строкой (`white-space: pre-line` у подписи): слитая с «Проверено …» в одно
+  // предложение, она переносилась посреди фразы.
+  return note ? `${note}\nПроверено ${stamp}` : `Проверено ${stamp}`;
+}
 const allRows = groups.flatMap((g) => g.rows);
 
 /** Заголовок и подпись по своду — те же слова, что у точки в шапке кабинетов (ztl-lab `HEADLINE`). */
@@ -225,8 +238,13 @@ writeFileSync(
   /* ДЕКОР — как на 404: два размытых пятна бренда. Строго декоративен, вне потока, ничего не
      перекрывает. Без отрицательного z-index: он клал бы слой ниже фона родителя, и пятна просто
      не были бы видны — отказ идеально тихий (разметка на месте, страница пустая). Порядок задан
-     разметкой: декор первым, содержимое несёт свой слой. */
-  .decor { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+     разметкой: декор первым, содержимое несёт свой слой.
+     ⚠️ НА ВСЮ ВЫСОТУ СТРАНИЦЫ, А НЕ ОКНА (25.10.2026). С группами страница стала длиннее экрана, а
+     слой был position: fixed высотой в окно — нижнее пятно обрезалось его краем, и на снимке
+     страницы целиком фон обрывался резкой горизонтальной границей. Теперь слой прибит к body
+     (position: relative) и тянется до низа документа; нижнее пятно стоит у конца страницы. */
+  body { position: relative; }
+  .decor { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
   .decor i {
     position: absolute; display: block; border-radius: 50%; filter: blur(64px);
   }
@@ -267,7 +285,7 @@ writeFileSync(
   .hero.slow .hero-icon.i-slow { display: block; color: hsl(var(--warning)); }
   .hero.down .hero-icon.i-down { display: block; color: hsl(var(--destructive)); }
   h1 { font-size: clamp(1.5rem, 5vw, 2rem); font-weight: 600; letter-spacing: -.025em; margin: 0 0 .5rem; }
-  .hero p { margin: 0; color: hsl(var(--muted-foreground)); font-size: .9375rem; }
+  .hero p { margin: 0; color: hsl(var(--muted-foreground)); font-size: .9375rem; white-space: pre-line; }
 
   .card { border: 1px solid hsl(var(--border)); border-radius: var(--radius);
           background: hsl(var(--card)); overflow: hidden; }
@@ -353,11 +371,7 @@ writeFileSync(
   <div class="hero ${overall} nf-in" style="animation-delay:60ms" data-hero>
     <span class="hero-icon i-up">${OK_ICON}</span><span class="hero-icon i-slow">${WARN_ICON}</span><span class="hero-icon i-down">${BAD_ICON}</span>
     <h1 data-headline>${HEADLINE[overall]}</h1>
-    <p data-checked>${
-      overall === "up" || overall === "unknown"
-        ? `Проверено ${when(h.updatedAt)}`
-        : `Мы знаем о проблеме и уже занимаемся ею. Проверено ${when(h.updatedAt)}`
-    }</p>
+    <p data-checked>${esc(subtitle(overall, notice, when(h.updatedAt)))}</p>
   </div>
 ${cards}
 ${historyBlock}
@@ -433,12 +447,10 @@ ${historyBlock}
     document.title = HEADLINE[overall] + " — DentBoard";
     var p = document.querySelector("[data-checked]");
     var stamp = when(h.updatedAt);
-    if (p && stamp) {
-      p.textContent = overall === "up" || overall === "unknown"
-        ? "Проверено " + stamp
-        : "Мы знаем о проблеме и уже занимаемся ею. Проверено " + stamp;
-    }
+    if (p && stamp) p.textContent = subtitle(overall, typeof h.notice === "string" ? h.notice : null, stamp);
   }
+  // Та же функция, что собирала страницу на сервере, — вставлена её исходником, не копией.
+  ${subtitle.toString()}
   function tick() {
     fetch("data/history.json", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })

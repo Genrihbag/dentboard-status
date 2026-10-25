@@ -212,6 +212,8 @@ const urls = Object.fromEntries(config.groups.flatMap((g) => g.rows).filter((r) 
 const history = {
   layout: LAYOUT,
   overall: view.overall,
+  // Оговорка к зелёному своду («резерв частично недоступен — на работу не влияет»), иначе null.
+  notice: view.notice,
   groups: publicView(view, latencyOf),
   current: compatCurrent(view, { now, urls, latencyOf }),
   events: [...moved.events, ...(previous.events ?? [])].slice(0, KEEP_EVENTS),

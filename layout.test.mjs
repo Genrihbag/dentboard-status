@@ -96,13 +96,38 @@ test("ожидаемый ответ DNS и адреса балансировщи
 
 /* ── БАЛАНСИРОВЩИКИ ──────────────────────────────────────────────────────────────────────── */
 
-test("лёг ОДИН балансировщик — группа жёлтая, «вход работает через второй», свод жёлтый, НЕ красный", () => {
+test("лёг ОДИН балансировщик — группа жёлтая, «вход работает через второй»; свод ЗЕЛЁНЫЙ с оговоркой", () => {
+  // Решение владельца 25.10.2026: людям всё работает, и «Есть проблемы» на странице и жёлтая
+  // точка в кабинетах читались бы клиентом как авария.
   const v = view({ lb2: dead() });
   assert.equal(row(v, "lb2").state, "down");
   assert.equal(row(v, "lb2").word, "не отвечает");
   assert.equal(group(v, "balancers").state, "warn");
   assert.match(group(v, "balancers").summary, /вход работает через второй/);
-  assert.equal(v.overall, "slow");
+  assert.equal(v.overall, "up");
+  assert.equal(v.notice, "Резерв частично недоступен — на работу это не влияет.");
+});
+
+test("один DNS и сертификат < 14 дней — тоже зелёный свод с оговоркой", () => {
+  assert.equal(view({ dns1: dnsWrong() }).overall, "up");
+  const c = view({ cert: cert(10) });
+  assert.equal(c.overall, "up");
+  assert.match(c.notice, /Сертификат скоро истекает/);
+});
+
+test("ЗДЕСЬ ОГОВОРКИ БЫТЬ НЕ ДОЛЖНО: всё здорово, или людям уже плохо", () => {
+  assert.equal(view().notice, null);
+  assert.equal(view({ portal: dead() }).notice, null);
+});
+
+test("ЗДЕСЬ ЗЕЛЁНОГО БЫТЬ НЕ ДОЛЖНО: запаса нет (оба балансировщика, оба DNS), сертификат вот-вот истечёт", () => {
+  assert.equal(view({ lb1: dead(), lb2: dead() }).overall, "slow");
+  assert.equal(view({ dns1: dnsWrong(), dns2: dnsSilent() }).overall, "slow");
+  assert.equal(view({ cert: cert(2) }).overall, "slow");
+});
+
+test("не работает одна страница для пользователей — свод жёлтый, а не зелёный", () => {
+  assert.equal(view({ portal: dead() }).overall, "slow");
 });
 
 test("легли ОБА — группа красная", () => {

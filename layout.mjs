@@ -154,8 +154,17 @@ export function groupState(rows) {
  *
  * 🔴 КРАСНЫЙ — ТОЛЬКО КОГДА ПРОДУКТ НЕДОСТУПЕН ЛЮДЯМ, то есть не работает ни одна строка группы
  * «Для пользователей» (решение владельца 28.08.2026: красная на каждую частную неисправность
- * обесценила бы красную вообще). Лёг один балансировщик, один DNS, сертификат на исходе, сервер
- * при живых страницах — жёлтый: «есть проблемы, подробности на странице».
+ * обесценила бы красную вообще).
+ *
+ * 🟡 ЖЁЛТЫЙ — ТОЛЬКО КОГДА ПЛОХО ЛЮДЯМ (решение владельца 25.10.2026): не работает страница для
+ * пользователей или «Сервер и база»; не работают ОБА балансировщика или ОБА DNS (запаса нет —
+ * это уже не резерв); сертификат вот-вот истечёт или чужой (браузер предупредит об опасности);
+ * две строки медленнее порога.
+ *
+ * 🟢 А ЛЁГ ОДИН ИЗ ДВУХ ИЛИ СЕРТИФИКАТУ МЕНЬШЕ 14 ДНЕЙ — ЗЕЛЁНЫЙ С ОГОВОРКОЙ (`noticeOf`). Людям
+ * в этот момент всё работает; «Есть проблемы — мы занимаемся» на странице и жёлтая точка в
+ * кабинетах читались бы клиентом как авария, которой нет. Владелец узнаёт о таком из канала
+ * («🟡 Внимание»), и строка на странице жёлтая — оговорка видна тому, кто смотрит подробно.
  *
  * Медленно — как и раньше, ДВЕ медленные строки, а не одна: одиночный выброс говорит о своей
  * цели, а не о системе. Считаются строки с временем ответа (страницы, балансировщики, сервер).
@@ -165,9 +174,29 @@ export function overallOf(groups) {
   if (rows.length === 0 || rows.every((r) => r.state === "unknown")) return "unknown";
   const users = groups.find((g) => g.id === "users");
   if (users && users.state === "down") return "down";
-  if (groups.some((g) => g.state === "warn" || g.state === "down")) return "slow";
+  if (groups.some((g) => hurtsPeople(g))) return "slow";
   if (rows.filter((r) => r.slow).length >= SLOW_TARGETS_MIN) return "slow";
   return "up";
+}
+
+/** Плохо ли людям от состояния группы — см. `overallOf`. */
+function hurtsPeople(g) {
+  if (g.state === "down") return true;
+  if (g.state !== "warn") return false;
+  // Жёлтая группа взаимозаменяемых частей — это резерв, а жёлтый сертификат — срок, не отказ.
+  return !(g.redundant || g.kind === "cert");
+}
+
+/**
+ * ОГОВОРКА К ЗЕЛЁНОМУ СВОДУ: людям всё работает, но запас не полон. `null` — оговорки нет.
+ * Публична, поэтому без провайдеров: только смысл для человека.
+ */
+export function noticeOf(groups, overall) {
+  if (overall !== "up") return null;
+  const soft = groups.filter((g) => g.state === "warn");
+  if (soft.length === 0) return null;
+  if (soft.every((g) => g.kind === "cert")) return "Сертификат скоро истекает, продлеваем — на работу это не влияет.";
+  return "Резерв частично недоступен — на работу это не влияет.";
 }
 
 /** Всё вместе: конфиг + сырые пробы (по `row.id`) → `{ groups, overall }`. */
@@ -179,7 +208,8 @@ export function evaluate(config, raw, opts = {}) {
     const summary = state === "warn" || state === "down" ? (g.say?.[state] ?? g.say?.down ?? null) : null;
     return { id: g.id, title: g.title, kind: g.kind, redundant: g.redundant === true, state, summary, rows };
   });
-  return { groups, overall: overallOf(groups) };
+  const overall = overallOf(groups);
+  return { groups, overall, notice: noticeOf(groups, overall) };
 }
 
 /**
