@@ -89,7 +89,10 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
       // Балансировщик, доведший запрос до неготового сервера (503 с телом готовности), жив —
       // неготовность называет строка «Сервер и база».
       const note = r.status && r.status !== 200 ? ` (сервер ответил ${r.status})` : "";
-      return { ...base, state: "up", word: "работает", value: `${r.ms} мс`, ms: r.ms, slow, detail: `${r.ms} мс${note}`, status: r.status };
+      // `shownDetail` — то же, что видит табло, без провайдеров и адресов: удержанная строка (`hold`)
+      // повторит его дословно, а не заменит на «работает».
+      const shown = `${r.ms} мс${note}`;
+      return { ...base, state: "up", word: "работает", value: `${r.ms} мс`, ms: r.ms, slow, detail: shown, shownDetail: shown, status: r.status };
     }
     /**
      * `misleads` — отказ, на котором люди НЕ уходят на запасной вход: браузер переспрашивает другой
@@ -117,7 +120,9 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
     const bad = (r.answers ?? []).filter((a) => !a.ok).map((a) => `${a.server}: ${a.error}`);
     const tally = `ответили ${r.answered} из ${r.total}`;
     const detail = [tally, ...bad].join("; ");
-    if (r.ok) return { ...base, state: "up", word: "работает", value: null, ms: null, slow: false, detail };
+    // У исправного провайдера в `detail` могут стоять имена молчащих серверов — частное; удержанной
+    // строке (`shownDetail`) хватит счёта.
+    if (r.ok) return { ...base, state: "up", word: "работает", value: null, ms: null, slow: false, detail, shownDetail: tally };
     // Неверный ответ резолвер кэширует и отдаёт людям — запасной провайдер их не спасает.
     return { ...base, state: "down", word: r.wrong ? "отвечает неверно" : "не отвечает", value: null, ms: null, slow: false, detail, misleads: Boolean(r.wrong) };
   }
@@ -254,6 +259,9 @@ const RANK = { up: 0, warn: 1, down: 2 };
 export function hold(group, r, prev) {
   const need = Number(group.confirm ?? 1);
   if (!(need >= 2) || !prev || !(r.state in RANK)) return r;
+  // Неверный ответ (DNS отдал чужой адрес, балансировщик ответил кодом ошибки) потерей пакетов не
+  // объясняется — это ОТВЕТ, и он бьёт по людям. Не задерживаем (ревью 25.10.2026).
+  if (r.misleads) return r;
   const was = prev.state === "unknown" ? prev.known : prev.state;
   if (!(was in RANK)) return r;
   if (RANK[r.state] <= RANK[was]) return r;
@@ -265,14 +273,31 @@ export function hold(group, r, prev) {
     word: prev.word ?? r.word,
     value: prev.value ?? null,
     ms: prev.ms ?? null,
-    slow: false,
+    slow: prev.slow === true,
     misleads: false,
     suspect: r.state,
     suspectRounds: seen,
     // Табло видит прежнее (`detail`), журнал машины — правду о первом сбое (`heldNote`).
-    detail: prev.value ?? prev.word ?? r.word,
+    detail: prev.shownDetail ?? prev.value ?? prev.word ?? r.word,
+    shownDetail: prev.shownDetail,
     heldNote: `первый сбой, ждём подтверждения следующим кругом (${r.word} — ${r.detail})`,
   };
+}
+
+/**
+ * Строки прошлого `history.json` (только текущей раскладки) по `id` — вход для `hold`.
+ *
+ * ⚠️ ТОЛЬКО ЕСЛИ ПРОШЛЫЙ КРУГ БЫЛ НЕДАВНО (ревью 25.10.2026). «Два круга подряд» — это две минуты,
+ * а не «две записи когда-нибудь»: после часа простоя наблюдателя первый сбой засчитался бы вторым.
+ * Старее `maxAgeMs` — прошлого для удержания нет, и сбой снова начинается с первого.
+ */
+export function previousRows(previous, { now = Date.now(), maxAgeMs = 3 * 60_000 } = {}) {
+  const out = {};
+  if (previous?.layout !== LAYOUT || !Array.isArray(previous.groups)) return out;
+  const at = Date.parse(previous.updatedAt ?? "");
+  if (!Number.isFinite(at) || now - at > maxAgeMs || at - now > maxAgeMs) return out;
+  for (const g of previous.groups) for (const r of g.rows ?? []) if (r?.id) out[r.id] = r;
+  return out;
 }
 
 /**
@@ -282,8 +307,28 @@ export function hold(group, r, prev) {
 export function evaluate(config, raw, opts = {}) {
   const balancers = config.groups.find((g) => g.kind === "balancer")?.rows ?? [];
   const prevRows = opts.prevRows ?? {};
+  // Балансировщики, чей первый сбой удержан (`hold`). Сертификат читается с тех же адресов по той же
+  // дороге: его отказ с такого адреса — тот же первый сбой, и называть его в табло («Балансировщик 2:
+  // не проверен») значило бы показать удержанное (ревью 25.10.2026).
+  const heldDoors = new Set();
+  const rawFor = (g, row) => {
+    const r = raw[row.id];
+    if (g.kind !== "cert" || heldDoors.size === 0 || !r?.perDoor) return r;
+    return { ...r, perDoor: r.perDoor.filter((d) => d.ok || !heldDoors.has(d.door)) };
+  };
   const groups = config.groups.map((g) => {
-    const rows = g.rows.map((row) => hold(g, evalRow(g, row, raw[row.id], { ...opts, balancers }), prevRows[row.id]));
+    const rows = g.rows.map((row) => {
+      const input = rawFor(g, row);
+      const r = hold(g, evalRow(g, row, input, { ...opts, balancers }), prevRows[row.id]);
+      // Сертификат остался только с удержанных адресов (их отказы отброшены) — он тоже удержан:
+      // показываем прошлое, а не «не проверен — не с кем было проверить».
+      const prev = prevRows[row.id];
+      if (g.kind === "cert" && input?.perDoor?.length === 0 && raw[row.id]?.perDoor?.length > 0 && prev) {
+        return { ...r, state: prev.state, known: prev.known, word: prev.word ?? r.word, value: prev.value ?? null, suspect: "unknown", suspectRounds: 0, detail: prev.shownDetail ?? prev.value ?? prev.word ?? r.word, heldNote: "сертификат не прочитан: балансировщики в первом сбое" };
+      }
+      return r;
+    });
+    if (g.kind === "balancer") for (const r of rows) if (r.suspect) heldDoors.add(r.id);
     const state = groupState(rows);
     // У «одного из двух», на котором люди НЕ уходят на запасной, своя фраза (`say.misleads`):
     // «вход работает через второй» там была бы неправдой.
@@ -322,6 +367,8 @@ export function publicView(view, latencyOf = () => undefined, prevStates = {}) {
         out.suspect = r.suspect;
         out.suspectRounds = r.suspectRounds;
       }
+      // Для удержания: что табло показывало по строке (без провайдеров и адресов). Страница не рисует.
+      if (r.shownDetail) out.shownDetail = r.shownDetail;
       const lat = latencyOf(r);
       if (lat) out.latency = lat;
       return out;
@@ -362,14 +409,6 @@ export function compatCurrent(view, { now, urls = {}, latencyOf = () => undefine
  * именем из `was`: «API и его зависимости», тот же `/health/ready`), берут прошлое из прежнего
  * `current`: сбой, пришедшийся ровно на выкат, иначе прошёл бы молча.
  */
-/** Строки прошлого `history.json` (только текущей раскладки) по `id` — вход для `hold`. */
-export function previousRows(previous) {
-  const out = {};
-  if (previous?.layout !== LAYOUT || !Array.isArray(previous.groups)) return out;
-  for (const g of previous.groups) for (const r of g.rows ?? []) if (r?.id) out[r.id] = r;
-  return out;
-}
-
 export function previousStates(previous, config) {
   const out = {};
   if (previous?.layout === LAYOUT && Array.isArray(previous.groups)) {

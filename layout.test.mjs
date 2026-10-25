@@ -448,7 +448,7 @@ function rounds(patches) {
     const v = evaluate(CONFIG, { ...healthy(), ...patch }, { slowMs: 1500, prevRows: previousRows(prevPub) });
     const moved = transitions(v, states, NOW);
     const texts = alertTexts(moved, v, "25.10, 22:41", "x");
-    prevPub = { layout: LAYOUT, groups: publicView(v, undefined, states) };
+    prevPub = { layout: LAYOUT, groups: publicView(v, undefined, states), updatedAt: new Date().toISOString() };
     out.push({ v, moved, texts, pub: prevPub });
   }
   return out;
@@ -502,4 +502,48 @@ test("ЗДЕСЬ ЗАДЕРЖКИ БЫТЬ НЕ ДОЛЖНО: первый кр�
   const [first] = rounds([{ lb2: dead() }]);
   assert.equal(row(first.v, "lb2").state, "down");
   assert.equal(first.texts.length, 0);
+});
+
+/* ── правки по ревью «двух кругов» ── */
+
+test("удержание не задерживает НЕВЕРНЫЙ ответ (DNS с чужим адресом) — это ответ, а не потеря пакетов", () => {
+  const [, first] = rounds([{}, { dns1: dnsWrong() }]);
+  assert.match(first.texts[0] ?? "", /^🔴 <b>Сбой: DNS 1<\/b>/);
+});
+
+test("первый сбой балансировщика НЕ виден и через строку сертификата в табло", () => {
+  const certLost = { perDoor: [
+    { door: "lb1", ok: true, days: 89, validTo: "2027-01-23T10:19:52.000Z", authorized: true, authorizationError: null },
+    { door: "lb2", ok: false, error: "connect ETIMEDOUT" },
+  ] };
+  const [, held] = rounds([{}, { lb2: dead(), cert: certLost }]);
+  const board = boardText(held.v, "25.10, 22:41", "x");
+  assert.doesNotMatch(board, /не проверен|не отвечает/);
+  const bothLost = { perDoor: [{ door: "lb1", ok: false, error: "x" }, { door: "lb2", ok: false, error: "y" }] };
+  const [, both] = rounds([{}, { lb1: dead(), lb2: dead(), cert: bothLost }]);
+  assert.doesNotMatch(boardText(both.v, "25.10, 22:41", "x"), /не проверен|не отвечает/);
+  assert.equal(both.texts.length, 0);
+});
+
+test("ЗДЕСЬ СКРЫВАТЬ НЕЧЕГО: подтверждённый сбой балансировщика — сертификат с него «не проверен» виден", () => {
+  const lost = { perDoor: [
+    { door: "lb1", ok: true, days: 89, validTo: "2027-01-23T10:19:52.000Z", authorized: true, authorizationError: null },
+    { door: "lb2", ok: false, error: "connect ETIMEDOUT" },
+  ] };
+  const r = rounds([{}, { lb2: dead(), cert: lost }, { lb2: dead(), cert: lost }]);
+  assert.match(boardText(r[2].v, "25.10, 22:42", "x"), /Балансировщик 2 \(Yandex Cloud, 153\.51\.113\.60\): не проверен/);
+});
+
+test("удержанная строка повторяет прежний вид: «ответили 2 из 2» у DNS, 🟡 у медленного балансировщика", () => {
+  const [, held] = rounds([{}, { dns2: dnsSilent() }]);
+  assert.match(boardText(held.v, "t", "x"), /DNS 2 \(Яндекс\) · ответили 2 из 2/);
+  const [, slowHeld] = rounds([{ lb2: up(9000) }, { lb2: dead() }]);
+  assert.equal(row(slowHeld.v, "lb2").slow, true);
+});
+
+test("давно не было круга (наблюдатель стоял) — прошлое для удержания не берётся", () => {
+  const prev = { layout: LAYOUT, groups: [], updatedAt: new Date(Date.now() - 60 * 60_000).toISOString() };
+  assert.deepEqual(previousRows(prev), {});
+  const fresh = { layout: LAYOUT, groups: [{ rows: [{ id: "x", state: "up" }] }], updatedAt: new Date().toISOString() };
+  assert.equal(previousRows(fresh).x.state, "up");
 });
