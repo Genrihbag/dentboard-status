@@ -37,6 +37,9 @@ import {
 // Балансировщик по адресу мимо DNS и сертификат, который он отдаёт; прямой вопрос провайдерам DNS.
 import { getVia, readCert } from "./door-probe.mjs";
 import { probeDnsProvider } from "./dns-probe.mjs";
+// Взаимная проверка с нескольких точек: голоса дверей «из России» (25.10.2026).
+import { fetchVote, controlsReachable, applyMesh, matrixLines } from "./mesh.mjs";
+import { resolve as resolvePath } from "node:path";
 // Табло — тоже отдельным файлом и по той же причине: расписание правок и текст обязаны
 // проверяться образцами, без сети и без Telegram.
 import { syncBoard, loadBoard } from "./board.mjs";
@@ -174,7 +177,24 @@ function within(promise, fallback) {
 }
 const LATE = "не успели: предел времени круга вышел";
 
-const [probed, dnsResults, certResults] = await Promise.all([
+/**
+ * ТОЧКИ НАБЛЮДЕНИЯ «ИЗ РОССИИ» — голоса дверей по ssh (mesh.mjs, 25.10.2026), параллельно с пробами и
+ * в том же пределе. Ключа на машине нет — точки «доступ не настроен», и решения идут как раньше.
+ */
+const meshCfg = config.mesh ?? null;
+const sshCmd = process.env.STATUS_SSH ? JSON.parse(process.env.STATUS_SSH) : ["ssh"];
+const meshKey = process.env.STATUS_DOOR_KEY ?? meshCfg?.key ?? null;
+const meshKnown = resolvePath(meshCfg?.knownHosts ?? "vps/doors.known_hosts");
+const meshFetch = meshCfg
+  ? Promise.all(
+      (meshCfg.vantages ?? []).map((v) =>
+        within(fetchVote(v, { key: meshKey, knownHosts: meshKnown, user: meshCfg.user, ssh: sshCmd }), { id: v.id, reach: "net", ms: null, error: LATE }),
+      ),
+    )
+  : Promise.resolve([]);
+const meshControls = meshCfg?.controls?.length ? within(controlsReachable(meshCfg.controls), false) : Promise.resolve(false);
+
+const [probed, dnsResults, certResults, fetchedVotes, controlsOk] = await Promise.all([
   probeAll(httpTargets, { headers: { "user-agent": "dentboard-status/1.0 (+https://github.com)" } }),
   Promise.all(
     (dnsGroup?.rows ?? []).map((row) =>
@@ -196,6 +216,8 @@ const [probed, dnsResults, certResults] = await Promise.all([
         }))
       : [],
   ),
+  meshFetch,
+  meshControls,
 ]);
 
 const raw = {};
@@ -203,8 +225,12 @@ httpTargets.forEach((t, i) => (raw[t.id] = probed[i]));
 (dnsGroup?.rows ?? []).forEach((row, i) => (raw[row.id] = dnsResults[i]));
 for (const row of certGroup?.rows ?? []) raw[row.id] = { perDoor: certResults };
 
+// Решение «кто кого видит» — до раскладки: отказ, который видит одна Европа, раскладка уже не видит.
+const meshed = applyMesh(config, raw, { fetched: Object.fromEntries(fetchedVotes.map((f) => [f.id, f])), controlsOk });
+const matrix = matrixLines(config, raw, meshed.mesh);
+
 // Прошлые строки — для «двух кругов подряд» у DNS и балансировщиков (`hold` в layout.mjs).
-const view = evaluate(config, raw, { prevRows: previousRows(previous) });
+const view = evaluate(config, meshed.raw, { prevRows: previousRows(previous) });
 
 // ⚠️ КОПИМ ТОЛЬКО УСПЕШНЫЕ. У неудачной пробы `ms` — время ДО ОТКАЗА, то есть чаще всего таймаут:
 // подмешав его, мы получили бы «медиана выросла до 15 секунд» там, где цель просто лежала, и
@@ -212,7 +238,7 @@ const view = evaluate(config, raw, { prevRows: previousRows(previous) });
 // накопленное окно переживает смену раскладки.
 const timed = view.groups.flatMap((g) => g.rows).filter((r) => ["http", "balancer", "ready"].includes(r.kind));
 // Удержанная строка (`suspect`) показывает ПРОШЛОЕ время — замером оно не является и в окно не идёт.
-for (const r of timed) if (r.state === "up" && !r.suspect && typeof r.ms === "number") latency = appendSample(latency, r.name, r.ms);
+for (const r of timed) if (r.state === "up" && !r.suspect && !r.cutoff && typeof r.ms === "number") latency = appendSample(latency, r.name, r.ms);
 // Окна снятых целей («API», «API и его зависимости») не копим вечно: их больше никто не пишет.
 latency = Object.fromEntries(Object.entries(latency).filter(([k]) => timed.some((r) => r.name === k)));
 // Свод по накопленному окну — ради него всё и заведено: порог «медленно» надо НАЗНАЧАТЬ ПО ЗАМЕРУ.
@@ -222,10 +248,12 @@ const latencyOf = (r) => (["http", "balancer", "ready"].includes(r.kind) ? summa
 for (const g of view.groups) {
   for (const r of g.rows) {
     // ⏳ — первый сбой, ещё не подтверждённый вторым кругом: видно только здесь, в журнале.
-    const mark = r.suspect ? "⏳" : r.state === "down" ? "🔴" : r.state === "warn" ? "🟡" : r.state === "unknown" ? "⚪" : "✅";
+    // 📡 — NL отрезан от России, показано прежнее; 🌍 — из Европы не видно, из России видно.
+    const mark = r.cutoff ? "📡" : r.suspect ? "⏳" : r.viaRU ? "🌍" : r.state === "down" ? "🔴" : r.state === "warn" ? "🟡" : r.state === "unknown" ? "⚪" : "✅";
     console.log(`${mark} ${g.title} · ${r.label ? `${r.name} (${r.label})` : r.name}: ${r.word} — ${r.heldNote ?? r.detail}`);
   }
 }
+for (const line of matrix) console.log(`   ${line}`);
 
 /**
  * Смены состояния. Первый в жизни запуск и первый круг новой раскладки событиями не считаются
@@ -347,7 +375,8 @@ const ALERT_RESERVE_MS = 2_000;
 const alertCap = () => Math.max(TELEGRAM_TIMEOUT_MS, remainingMs() - ALERT_RESERVE_MS);
 
 // Тексты — в `layout.mjs` (проверяются образцами): по сообщению на «сбой», «внимание», «работает».
-for (const text of alertTexts(moved, view, stamp, STATUS_PAGE)) await telegram(text, alertCap());
+// Матрица «кто кого видит» — к «Сбою» и «Вниманию»: по ней видно, сколько мест не видит цель.
+for (const text of alertTexts(moved, view, stamp, STATUS_PAGE, matrix)) await telegram(text, alertCap());
 
 /**
  * АВАТАР КАНАЛА — ПОСЛЕ записи истории и ПОСЛЕ сообщений.
@@ -374,7 +403,7 @@ console.log(`аватар: наблюдаем «${avatar.observed}», на ка�
  * сообщение с номером `id - 1` вслепую, и с появлением табла этим соседом может оказаться оно
  * само. Довод целиком — в `avatar.mjs`.
  */
-const board = await syncBoard(view, stamp, STATUS_PAGE, { changed });
+const board = await syncBoard(view, stamp, STATUS_PAGE, { changed, matrix });
 console.log(`табло: ${board.mode}${board.messageId ? ` (№${board.messageId})` : ""} — ${board.why}`);
 
 /* Признак «коммитить ли» отдаётся оболочке ЯВНО, а не выводится ею из текста вывода: разбор

@@ -135,6 +135,33 @@ else
   echo "       переписать — «hostfile_replace_entries: Operation not permitted»."
 fi
 
+say "4б. Ключ к голосам дверей (взаимная проверка с нескольких точек)"
+# 🔴 ЗАЧЕМ (25.10.2026). Тревога «не работает» уходит, только если цель не видят точки из РАЗНЫХ мест:
+# эта машина (Европа) и наблюдатели на дверях (Россия). Голос двери NL забирает по ssh ключом ниже —
+# у двери на него вынужденная команда `cat vote.json` от учётки dentboard-status, больше ничего.
+#
+# ⚠️ КЛЮЧ ГЕНЕРИРУЕТСЯ ЗДЕСЬ И НЕ ПОКИДАЕТ МАШИНУ: наружу идёт только открытая часть. Уже есть —
+# не трогаем: новый ключ молча отрезал бы NL от дверей до следующей установки на них.
+DOOR_KEY=/home/$USER_NAME/.ssh/dentboard_doors_ed25519
+if ! command -v ssh > /dev/null 2>&1; then
+  echo "  ⚠ нет ssh-клиента (apt install -y openssh-client) — голоса дверей забирать нечем,"
+  echo "    круг идёт как раньше, в табло «доступ не настроен»"
+elif [ -f "$DOOR_KEY" ]; then
+  echo "  ключ уже есть — не трогаю: $DOOR_KEY"
+else
+  sudo -u "$USER_NAME" install -d -m 700 "/home/$USER_NAME/.ssh"
+  sudo -u "$USER_NAME" ssh-keygen -q -t ed25519 -N '' -C "dentboard-status@nl" -f "$DOOR_KEY"
+  echo "  создан ключ $DOOR_KEY"
+fi
+if [ -f "$DOOR_KEY.pub" ]; then
+  echo "  ОТКРЫТАЯ часть (не секрет) — в ztl-lab файлом infra/failover/status-nl.pub, затем"
+  echo "  на двери её ставит \`bash infra/failover/arm.sh --observers\`:"
+  echo
+  sed 's/^/      /' "$DOOR_KEY.pub"
+  echo
+  echo "  До этого табло пишет «голос недоступен (ключ не принят)», решения идут как раньше."
+fi
+
 say "5. Сайт состояния"
 SITE_DIR=${SITE_DIR:-/var/www/status}
 # ⚠️ ВЛАДЕЛЕЦ СТАВИТСЯ ЯВНО И НА ВЕСЬ КАТАЛОГ. `install -d -o … a/b` не гарантирует владельца

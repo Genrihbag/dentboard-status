@@ -1,0 +1,6 @@
+# Ключи хоста балансировщиков (ed25519) — для ssh наблюдателя NL к голосам дверей (mesh.mjs,
+# StrictHostKeyChecking=yes). Публичные. Копия ztl-lab infra/door/known_hosts (сверено там 25.10.2026
+# со свежим ssh-keyscan). Пересоздали дверь — обновить строку здесь И там, иначе ssh откажет громко
+# («голос недоступен: ключ хоста»), а не уйдёт к чужой машине молча.
+136.234.13.100 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKT0aTyWforrkpc4mvK4dFBmJgX4SzwT3mcvDme6t+hM
+153.51.113.60 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGqd7vNBGWYxnLyehGwFOTVerSwYecdhJa1Na6MxsylC

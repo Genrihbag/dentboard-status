@@ -54,7 +54,7 @@ export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 5)
  * цвет авы: «что считать медленным» обязано жить в одном месте, иначе табло и ава однажды скажут
  * разное об одном и том же прогоне, и правым будет выглядеть тот, на кого смотрят.
  */
-export function boardText(view, stamp, statusPage) {
+export function boardText(view, stamp, statusPage, matrix = []) {
   /**
    * ПО ГРУППАМ, КАК НА СТРАНИЦЕ (25.10.2026), НО С ПРОВАЙДЕРАМИ И ПРИЧИНАМИ. Страница публичная и
    * говорит только «работает / не работает»; табло читает владелец, и ему надо понимать, кто есть
@@ -77,11 +77,15 @@ export function boardText(view, stamp, statusPage) {
     return out.join("\n");
   });
 
+  // «Кто кого видит» (mesh.mjs): мс по точкам и пометки «из Европы не видно, из России видно».
+  const seen = matrix.length ? ["", "<b>Кто кого видит</b>", ...matrix.map(esc)] : [];
+
   return [
     "<b>DentBoard — состояние</b>",
     `Проверено ${stamp} МСК`,
     "",
     blocks.join("\n\n"),
+    ...seen,
     "",
     `<a href="${statusPage}">Подробности и история</a>`,
   ].join("\n");
@@ -194,10 +198,10 @@ async function sendAndPin(token, chat, text) {
  * `edited` · `sent` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
  * «Telegram отказал» в одно значение, а они требуют разных действий.
  */
-export async function syncBoard(view, stamp, statusPage, { changed = false } = {}) {
+export async function syncBoard(view, stamp, statusPage, { changed = false, matrix = [] } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
-  const nextText = boardText(view, stamp, statusPage);
+  const nextText = boardText(view, stamp, statusPage, matrix);
   if (!token || !chat) {
     // Текст печатается: журнал частный, а подменный круг без него не показал бы, что встало бы в канал.
     console.log("[табло] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — табло не трогаем. Текст:");

@@ -82,6 +82,27 @@ export function balancerAccepts(status, body) {
 export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}) {
   const base = { id: row.id, name: row.name, kind: group.kind, label: row.label ?? null, ip: row.ip ?? null };
   if (!r) return { ...base, state: "unknown", word: "не проверен", value: null, ms: null, slow: false, detail: "проба не выполнялась" };
+  // NL отрезан от России (mesh.mjs): это не наблюдение — `hold` покажет прежнее состояние.
+  if (r.cutoff) {
+    const why = r.nlError ? ` (${r.nlError})` : "";
+    return { ...base, state: "unknown", word: "не проверен", value: null, ms: null, slow: false, detail: `из Европы нет связи с Россией${why}`, cutoff: true };
+  }
+  // Из Европы не видно, из России видно (mesh.mjs): строка работает — людям она открывается.
+  if (r.viaRU && (group.kind === "http" || group.kind === "balancer" || group.kind === "ready")) {
+    return {
+      ...base,
+      state: "up",
+      word: group.kind === "ready" ? "работают" : "работает",
+      value: null,
+      ms: null,
+      slow: false,
+      detail: `из Европы не видно (${r.nlError ?? "нет ответа"}); из России видно: ${r.ruText}`,
+      viaRU: true,
+      status: r.status ?? 0,
+    };
+  }
+  // Отказ, подтверждённый Россией, — с её словами в подробностях (канал).
+  const ruNote = r.ruText ? `; Россия: ${r.ruText}` : "";
 
   if (group.kind === "http" || group.kind === "balancer") {
     if (r.ok) {
@@ -100,7 +121,7 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
      * человеку. Такой отказ в паре — уже не «резерв», а беда для части людей (ревью 25.10.2026).
      */
     const misleads = group.kind === "balancer" && Boolean(r.status);
-    return { ...base, state: "down", word: r.status ? "не работает" : "не отвечает", value: null, ms: null, slow: false, detail: httpWhy(r), status: r.status ?? 0, error: r.error ?? null, misleads };
+    return { ...base, state: "down", word: r.status ? "не работает" : "не отвечает", value: null, ms: null, slow: false, detail: httpWhy(r) + ruNote, status: r.status ?? 0, error: r.error ?? null, misleads };
   }
 
   if (group.kind === "ready") {
@@ -113,7 +134,7 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
     const why = [httpWhy(r)];
     if (rd && !rd.dbUp) why.push("база не отвечает");
     if (rd && !rd.redisUp) why.push("Redis не отвечает");
-    return { ...base, state: "down", word: "не отвечают", value: null, ms: null, slow: false, detail: why.join(", "), status: r.status ?? 0, error: r.error ?? null };
+    return { ...base, state: "down", word: "не отвечают", value: null, ms: null, slow: false, detail: why.join(", ") + ruNote, status: r.status ?? 0, error: r.error ?? null };
   }
 
   if (group.kind === "dns") {
@@ -257,6 +278,27 @@ const RANK = { up: 0, warn: 1, down: 2 };
  * мешает; когда лежат оба, люди это видят по страницам — те красятся без задержки.
  */
 export function hold(group, r, prev) {
+  // NL отрезан от России (mesh.mjs) — у ЛЮБОЙ строки, не только с `confirm`: показываем прежнее, а
+  // правду пишем в журнал. Прошлого нет — «не проверен», как и было.
+  if (r.cutoff) {
+    if (!prev) return r;
+    const was = prev.state === "unknown" ? prev.known : prev.state;
+    if (!(was in RANK)) return r;
+    return {
+      ...r,
+      state: was,
+      word: prev.word ?? r.word,
+      value: prev.value ?? null,
+      ms: prev.ms ?? null,
+      slow: prev.slow === true,
+      detail: prev.shownDetail ?? prev.value ?? prev.word ?? r.word,
+      shownDetail: prev.shownDetail,
+      // Серия «первого сбоя» отрезанностью не прерывается и не продолжается: переносим как была.
+      suspect: prev.suspect,
+      suspectRounds: prev.suspectRounds,
+      heldNote: `${r.detail} — показано прежнее`,
+    };
+  }
   const need = Number(group.confirm ?? 1);
   if (!(need >= 2) || !prev || !(r.state in RANK)) return r;
   // Неверный ответ (DNS отдал чужой адрес, балансировщик ответил кодом ошибки) потерей пакетов не
@@ -328,7 +370,9 @@ export function evaluate(config, raw, opts = {}) {
       }
       return r;
     });
-    if (g.kind === "balancer") for (const r of rows) if (r.suspect) heldDoors.add(r.id);
+    // Тот же довод для «из Европы не видно, из России видно» (mesh.mjs): сертификат с такого адреса
+    // из Европы не читается по той же дороге, и «не проверен» про него — пометка о дороге, а не о нём.
+    if (g.kind === "balancer") for (const r of rows) if (r.suspect || r.viaRU || r.cutoff) heldDoors.add(r.id);
     const state = groupState(rows);
     // У «одного из двух», на котором люди НЕ уходят на запасной, своя фраза (`say.misleads`):
     // «вход работает через второй» там была бы неправдой.
@@ -493,8 +537,10 @@ export function privateName(r) {
  * причиной: канал читает владелец, ему надо понимать, кто есть кто. Сводка группы («вход работает
  * через второй») — затем, чтобы по одному сообщению было ясно, страшно это или нет.
  */
-export function alertTexts({ down, warn, up }, view, stamp, statusPage) {
+export function alertTexts({ down, warn, up }, view, stamp, statusPage, matrix = []) {
   const out = [];
+  // Матрица «кто кого видит» (mesh.mjs) — курсивом под причиной: сколько мест не видит цель.
+  const seen = matrix.length ? [`<i>${matrix.map(esc).join("\n")}</i>`] : [];
   const lines = (items) =>
     items.map(({ row }) => `${esc(privateName(row))}: ${esc(row.state === "up" ? row.word : `${row.word} — ${row.detail}`)}`);
   const summaries = (items) => [...new Set(items.map(({ group }) => view.groups.find((g) => g.id === group.id)?.summary).filter(Boolean))];
@@ -504,6 +550,7 @@ export function alertTexts({ down, warn, up }, view, stamp, statusPage) {
         `🔴 <b>Сбой: ${esc(down.map(({ row }) => row.name).join(", "))}</b>`,
         ...lines(down),
         ...summaries(down).map(esc),
+        ...seen,
         `${stamp} МСК · работаем над восстановлением.`,
         `<a href="${statusPage}">Подробности</a>`,
       ].join("\n"),
@@ -515,6 +562,7 @@ export function alertTexts({ down, warn, up }, view, stamp, statusPage) {
         `🟡 <b>Внимание: ${esc(warn.map(({ row }) => row.name).join(", "))}</b>`,
         ...lines(warn),
         ...summaries(warn).map(esc),
+        ...seen,
         `${stamp} МСК`,
         `<a href="${statusPage}">Подробности</a>`,
       ].join("\n"),
