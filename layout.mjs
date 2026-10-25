@@ -224,12 +224,11 @@ export function hurtsPeople(g) {
  */
 export function noticeOf(groups, overall) {
   if (overall !== "up") return null;
-  const soft = groups.filter((g) => g.state === "warn");
+  // Только группы, которые ВИДНЫ на странице: оговорка про сертификат, которого на странице нет
+  // (`onPage: false`, решение владельца 25.10.2026), была бы фразой ни о чём. О сертификате на
+  // исходе владелец узнаёт из канала.
+  const soft = groups.filter((g) => g.state === "warn" && g.onPage !== false);
   if (soft.length === 0) return null;
-  const cert = soft.some((g) => g.kind === "cert");
-  const reserve = soft.some((g) => g.kind !== "cert");
-  if (cert && reserve) return "Резерв частично недоступен, сертификат скоро истекает — на работу это не влияет.";
-  if (cert) return "Сертификат скоро истекает, продлеваем — на работу это не влияет.";
   return "Резерв частично недоступен — на работу это не влияет.";
 }
 
@@ -243,7 +242,7 @@ export function evaluate(config, raw, opts = {}) {
     // «вход работает через второй» там была бы неправдой.
     const key = state === "warn" && rows.some((r) => r.misleads) && g.say?.misleads ? "misleads" : state;
     const summary = state === "warn" || state === "down" ? (g.say?.[key] ?? g.say?.down ?? null) : null;
-    return { id: g.id, title: g.title, kind: g.kind, redundant: g.redundant === true, state, summary, rows };
+    return { id: g.id, title: g.title, kind: g.kind, redundant: g.redundant === true, onPage: g.onPage !== false, state, summary, rows };
   });
   const overall = overallOf(groups);
   return { groups, overall, notice: noticeOf(groups, overall) };
@@ -257,6 +256,8 @@ export function publicView(view, latencyOf = () => undefined, prevStates = {}) {
   return view.groups.map((g) => ({
     id: g.id,
     title: g.title,
+    // Рисовать ли группу на странице. В JSON она остаётся: по ней круг помнит прошлое состояние.
+    onPage: g.onPage !== false,
     state: g.state,
     summary: g.summary,
     rows: g.rows.map((r) => {

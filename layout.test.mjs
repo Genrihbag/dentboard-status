@@ -109,11 +109,13 @@ test("лёг ОДИН балансировщик — группа жёлтая, 
   assert.equal(v.notice, "Резерв частично недоступен — на работу это не влияет.");
 });
 
-test("один DNS молчит и сертификат < 14 дней — тоже зелёный свод с оговоркой", () => {
-  assert.equal(view({ dns2: dnsSilent() }).overall, "up");
+test("один DNS молчит — зелёный свод с оговоркой; сертификат < 14 дней — зелёный БЕЗ оговорки (его нет на странице)", () => {
+  const d = view({ dns2: dnsSilent() });
+  assert.equal(d.overall, "up");
+  assert.match(d.notice, /Резерв частично недоступен/);
   const c = view({ cert: cert(10) });
   assert.equal(c.overall, "up");
-  assert.match(c.notice, /Сертификат скоро истекает/);
+  assert.equal(c.notice, null);
 });
 
 test("ЗДЕСЬ ОГОВОРКИ БЫТЬ НЕ ДОЛЖНО: всё здорово, или людям уже плохо", () => {
@@ -417,6 +419,18 @@ test("адреса IPv6 вырезаются; время вида 10:30:00 — �
   assert.equal(redact("в 10:30:00 ответа не было"), "в 10:30:00 ответа не было");
 });
 
-test("оговорка: резерв и сертификат вместе — названы оба", () => {
-  assert.match(view({ lb2: dead(), cert: cert(10) }).notice, /Резерв частично недоступен, сертификат скоро истекает/);
+test("оговорка: резерв и сертификат вместе — только про резерв (сертификата на странице нет)", () => {
+  assert.equal(view({ lb2: dead(), cert: cert(10) }).notice, "Резерв частично недоступен — на работу это не влияет.");
+});
+
+test("сертификат: на странице не рисуется, но в JSON остаётся — по нему круг помнит прошлое", () => {
+  const pub = publicView(view());
+  const c = pub.find((g) => g.id === "cert");
+  assert.equal(c.onPage, false);
+  assert.ok(pub.filter((g) => g.id !== "cert").every((g) => g.onPage === true));
+});
+
+test("ЗДЕСЬ ЗЕЛЁНОГО БЫТЬ НЕ ДОЛЖНО: сертификат истёк или чужой — свод «Есть проблемы», хоть его и нет на странице", () => {
+  assert.equal(view({ cert: cert(-1, 89, { authorized: false, authorizationError: "CERT_HAS_EXPIRED" }) }).overall, "slow");
+  assert.equal(view({ cert: cert(89, 89, { authorized: false, authorizationError: "ERR_TLS_CERT_ALTNAME_INVALID" }) }).overall, "slow");
 });

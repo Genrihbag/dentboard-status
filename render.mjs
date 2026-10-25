@@ -64,7 +64,20 @@ function subtitle(state, note, stamp) {
   // предложение, она переносилась посреди фразы.
   return note ? `${note}\nПроверено ${stamp}` : `Проверено ${stamp}`;
 }
-const allRows = groups.flatMap((g) => g.rows);
+/**
+ * 🔴 НА СТРАНИЦЕ — ТОЛЬКО «РАБОТАЕТ / НЕ РАБОТАЕТ» (решение владельца 25.10.2026, после выката
+ * групп). Числа — миллисекунды, задержка базы, сколько серверов имён ответили, дни до конца
+ * сертификата — клиенту ничего не говорят и только пугают; они остаются в канале (сообщения и
+ * табло) и в `history.json` — его читает точка состояния в кабинетах, и совместимость важнее.
+ *
+ * Группы с `onPage: false` (сертификат) на странице не рисуются вовсе: проверка идёт, сообщения в
+ * канал уходят, свод она по-прежнему красит, когда людям реально плохо (истёк, чужой, < 3 дней).
+ * Её события в «Последних событиях» тоже не показываются — иначе строка, которой на странице нет,
+ * появлялась бы в истории.
+ */
+const shown = groups.filter((g) => g.onPage !== false);
+const offPage = new Set(groups.filter((g) => g.onPage === false).map((g) => g.title));
+const allRows = shown.flatMap((g) => g.rows);
 
 /** Заголовок и подпись по своду — те же слова, что у точки в шапке кабинетов (ztl-lab `HEADLINE`). */
 const HEADLINE = { up: "Все сервисы работают", slow: "Есть проблемы", down: "Сервисы недоступны", unknown: "Состояние неизвестно" };
@@ -89,7 +102,7 @@ const WARN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
  * «DNS 2» — и только «работает / не работает». Подробности — в канале.
  */
 let delay = 100;
-const cards = groups
+const cards = shown
   .map((g) => {
     const multi = g.rows.length > 1;
     const showState = multi && g.state !== "up";
@@ -111,7 +124,6 @@ const cards = groups
       <li class="row" data-row="${esc(r.id)}">
         <span class="row-name">${esc(r.name)}</span>
         <span class="row-state ${ROW_CLASS[r.state] ?? "is-unknown"}">
-          <span class="row-ms${r.slow ? " is-slow" : ""}">${r.value ? esc(r.value) : ""}</span>
           <span class="dot" aria-hidden="true"></span><span class="row-word">${esc(r.word)}</span>
         </span>
       </li>`,
@@ -137,7 +149,7 @@ const cards = groups
  * значило бы подделывать её.
  */
 const phrase = (e) => (e.phrase ? e.phrase : e.state === "упал" ? "перестал отвечать" : "снова отвечает");
-const events = Array.isArray(h.events) ? h.events : [];
+const events = (Array.isArray(h.events) ? h.events : []).filter((e) => !offPage.has(e.group));
 const historyBlock =
   events.length === 0
     ? ""
@@ -313,25 +325,9 @@ writeFileSync(
   .row-state.is-warn { color: hsl(var(--warning-strong)); }
   .row-state.is-down { color: hsl(var(--destructive)); }
   .row-state.is-unknown { color: hsl(var(--muted-foreground)); }
-  /**
-   * ВРЕМЯ ОТВЕТА — ПРИГЛУШЁННЫМ И БЕЗ ПОЯСНЕНИЙ (возвращено 29.08.2026 по просьбе владельца).
-   *
-   * 🔴 ПОЧЕМУ ОНО УХОДИЛО И ПОЧЕМУ ВЕРНУЛОСЬ В ДРУГОМ ВИДЕ. 28.08 миллисекунды сняли вместе с
-   * абзацем-оправданием под ними: они не отвечают на вопрос, с которым сюда приходят («это у меня
-   * или у них?»), а число вроде «2842 мс» без контекста пугает того, кто просто зашёл.
-   *
-   * Вернулись они мелкими и серыми РЯДОМ со словом «работает», а не вместо него. Порядок чтения
-   * сохранён: сначала ответ на главный вопрос, потом подробность для того, кто её искал. Абзац
-   * под таблицей не возвращён намеренно — если число требует объяснения, объяснять надо число,
-   * а не заводить абзац.
-   *
-   * У неотвечающей цели времени НЕ показываем: там оно означало бы «сколько ждали до отказа», то
-   * есть совсем другую величину под тем же видом.
-   */
-  .row-ms { color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; font-size: .8125rem; }
-  /* Ответила, но медленнее порога — число тем же жёлтым, что и «работает частично»: строка при этом
-     работает, и слово остаётся «работает». */
-  .row-ms.is-slow { color: hsl(var(--warning-strong)); }
+  /* ЧИСЕЛ У СТРОК НЕТ (25.10.2026, решение владельца): миллисекунды возвращались 29.08 мелкими и
+     серыми, и снова сняты — клиенту они не отвечают на вопрос «работает ли», а пугают. Числа — в
+     канале (сообщения и табло) и в data/history.json. */
   .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; flex: none; }
 
   .event { display: flex; gap: .875rem; padding: .6875rem 1.125rem; font-size: .875rem; }
@@ -430,12 +426,10 @@ ${historyBlock}
         var li = card.querySelector('[data-row="' + r.id + '"]');
         if (!li) continue;
         var state = li.querySelector(".row-state");
-        var ms = li.querySelector(".row-ms");
         var word = li.querySelector(".row-word");
         if (state) state.className = "row-state " + (CLS[r.state] || "is-unknown");
         // Число — то, что положил круг (поле value): у не ответившей строки его нет, потому что там
         // оно означало бы длительность ожидания до отказа — другую величину под тем же видом.
-        if (ms) { ms.textContent = r.value || ""; ms.className = "row-ms" + (r.slow ? " is-slow" : ""); }
         if (word) word.textContent = r.word || "";
       }
     }
