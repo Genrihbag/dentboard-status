@@ -572,7 +572,13 @@ export function alertTexts({ down, warn, up }, view, stamp, statusPage, matrix =
   // Матрица «кто кого видит» (mesh.mjs) — курсивом под причиной: сколько мест не видит цель.
   const seen = matrix.length ? [`<i>${matrix.map(esc).join("\n")}</i>`] : [];
   const lines = (items) =>
-    items.map(({ row }) => `${esc(privateName(row))}: ${esc(row.state === "up" ? row.word : `${row.word} — ${row.detail}`)}`);
+    // Имя — жирным (26.10.2026), провайдер и адрес — рядом, обычным: кто есть кто нужен владельцу здесь,
+    // в табло их нет.
+    items.map(({ row }) => {
+      const who = [row.label, row.ip].filter(Boolean).join(", ");
+      const what = row.state === "up" ? row.word : `${row.word} — ${row.detail}`;
+      return `<b>${esc(row.name)}</b>${who ? ` (${esc(who)})` : ""}: ${esc(what)}`;
+    });
   const summaries = (items) => [...new Set(items.map(({ group }) => view.groups.find((g) => g.id === group.id)?.summary).filter(Boolean))];
   if (down.length) {
     out.push(

@@ -15,7 +15,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { boardText, decideBoard } from "./board.mjs";
+import { boardText, decideBoard, TELEGRAM_LIMIT } from "./board.mjs";
 import { evaluate } from "./layout.mjs";
 
 const STAMP = "30.08, 03:12";
@@ -44,19 +44,51 @@ const CONFIG = {
   ],
 };
 const up = (ms = 180) => ({ ok: true, status: 200, ms });
-const text = (raw) => boardText(evaluate(CONFIG, raw, { slowMs: 1500 }), STAMP, PAGE);
-
-test("живая цель — галочка и её время ответа", () => {
-  assert.match(text({ app: up(180), lb1: up(), lb2: up() }), /✅ Кабинет лаборатории · 180 мс/);
+const text = (raw, mesh = null) => boardText(evaluate(CONFIG, raw, { slowMs: 1500 }), STAMP, PAGE, mesh);
+const pre = (t) => (t.match(/<pre>([\s\S]*?)<\/pre>/) ?? [null, ""])[1];
+const lineOf = (t, name) => pre(t).split("\n").find((l) => l.includes(name)) ?? "";
+const RU = (o = {}) => ({
+  votes: [
+    { fresh: true, prod: { code: "200", ms: o.p1 ?? 45 }, peer: { addr: "153.51.113.60", state: o.peer2 ?? "up", ms: 12 } },
+    { fresh: true, prod: { code: "200", ms: o.p2 ?? 41 }, peer: { addr: "136.234.13.100", state: "up", ms: 9 } },
+  ],
+  notes: { ruUp: [], cutoff: false },
 });
 
-test("упавшая цель названа ПРИЧИНОЙ, а не только значком", () => {
-  // «Не отвечает» и «отвечает пятисоткой» лечатся по-разному, и человек, открывший канал, решает
-  // по этому различию, идти ли ему работать.
-  const nothing = text({ app: { ok: false, status: 0, ms: 15000, error: "This operation was aborted (TimeoutError)" }, lb1: up(), lb2: up() });
+test("табло — таблица в <pre>: шапка, по строке на цель, колонки NL и RU", () => {
+  const t = text({ app: up(180), lb1: up(120), lb2: up(130) }, RU());
+  assert.match(t, /^<b>DentBoard — состояние<\/b>\nПроверено 30\.08, 03:12 МСК/);
+  assert.match(pre(t), /Цель\s+NL\s+RU/);
+  assert.match(lineOf(t, "Кабинет лаборатории"), /^✅ Кабинет лаборатории\s+180 мс\s+—$/);
+  assert.match(lineOf(t, "Балансировщик 1"), /^✅ Балансировщик 1\s+120 мс\s+9 мс$/, "RU у балансировщика — глазами соседа");
+  assert.match(lineOf(t, "Балансировщик 2"), /^✅ Балансировщик 2\s+130 мс\s+12 мс$/);
+});
+
+test("колонки ровные: длина строк таблицы одинакова (кроме шапки, где вместо значка два пробела)", () => {
+  const lines = pre(text({ app: up(5), lb1: up(12345), lb2: { ok: false, status: 502, ms: 1 } }, RU())).split("\n").slice(1);
+  const lens = new Set(lines.map((l) => [...l].length));
+  assert.equal(lens.size, 1, `разная длина строк: ${lines.join(" | ")}`);
+});
+
+test("в табло НЕТ провайдеров и адресов — они в событийных сообщениях", () => {
+  const t = text({ app: up(), lb1: up(), lb2: { ok: false, status: 0, ms: 15000, error: "connect ETIMEDOUT 153.51.113.60:443" } }, RU());
+  for (const leak of ["Selectel", "Yandex", "СПб", "136.234", "153.51", "ETIMEDOUT"]) assert.ok(!t.includes(leak), `в табло «${leak}»`);
+});
+
+test("отказ — словом в колонке NL: «нет» без ответа, «код 502» с ответом; значок 🔴", () => {
+  const nothing = text({ app: { ok: false, status: 0, ms: 15000, error: "x" }, lb1: up(), lb2: up() });
   const five = text({ app: { ok: false, status: 502, ms: 300 }, lb1: up(), lb2: up() });
-  assert.match(nothing, /🔴 Кабинет лаборатории · не отвечает — This operation was aborted/);
-  assert.match(five, /🔴 Кабинет лаборатории · не работает — код 502/);
+  assert.match(lineOf(nothing, "Кабинет"), /^🔴 Кабинет лаборатории\s+нет\s+—$/);
+  assert.match(lineOf(five, "Кабинет"), /^🔴 Кабинет лаборатории\s+код 502\s+—$/);
+});
+
+test("RU: голосов нет вовсе — «—» у всех строк", () => {
+  const t = text({ app: up(), lb1: up(), lb2: up() });
+  for (const l of pre(t).split("\n").slice(1)) assert.match(l, /—$/);
+});
+
+test("сосед не видит балансировщик — RU «нет»", () => {
+  assert.match(lineOf(text({ app: up(), lb1: up(), lb2: up() }, RU({ peer2: "unreachable" })), "Балансировщик 2"), /нет$/);
 });
 
 test("медленная цель — 🟡; а быстрая НЕ 🟡", () => {
@@ -67,20 +99,34 @@ test("медленная цель — 🟡; а быстрая НЕ 🟡", () => 
 });
 
 test("время проверки стои́т в тексте — иначе замёрзшее табло выглядит здоровым", () => {
-  assert.match(text({ app: up(), lb1: up(), lb2: up() }), new RegExp(`Проверено ${STAMP.replace(/[.,]/g, "\$&")} МСК`));
+  assert.match(text({ app: up(), lb1: up(), lb2: up() }), /Проверено 30\.08, 03:12 МСК/);
 });
 
-test("в табло — группы, провайдер и адрес балансировщика, и фраза «вход работает через второй»", () => {
-  // Канал читает владелец: ему нужно «кто есть кто», которого на публичной странице нет намеренно.
-  const t = text({ app: up(), lb1: up(120), lb2: { ok: false, status: 0, ms: 15000, error: "connect ETIMEDOUT" } });
-  assert.match(t, /<b>Балансировщики<\/b>/);
-  assert.match(t, /✅ Балансировщик 1 \(Selectel, СПб, 136\.234\.13\.100\) · 120 мс/);
-  assert.match(t, /🔴 Балансировщик 2 \(Yandex Cloud, 153\.51\.113\.60\) · не отвечает — connect ETIMEDOUT/);
-  assert.match(t, /Один балансировщик недоступен — вход работает через второй\./);
+test("фраза группы — под таблицей курсивом; раздела «Кто кого видит» нет", () => {
+  const t = text({ app: up(), lb1: up(120), lb2: { ok: false, status: 0, ms: 15000, error: "x" } }, RU());
+  assert.match(t, /<\/pre>\n\n<i>Один балансировщик недоступен — вход работает через второй\.<\/i>/);
+  assert.doesNotMatch(t, /Кто кого видит/);
 });
 
 test("ЗДЕСЬ ФРАЗЫ О ЗАПАСЕ БЫТЬ НЕ ДОЛЖНО: оба балансировщика живы", () => {
   assert.doesNotMatch(text({ app: up(), lb1: up(), lb2: up() }), /через второй/);
+});
+
+test("экранирование: < > & в имени цели и во фразе не ломают разметку", () => {
+  const cfg = { groups: [{ id: "u", title: "T", kind: "http", say: { down: "a < b & c > d" }, rows: [{ id: "x", name: "Сайт <&> тест" }] }] };
+  const t = boardText(evaluate(cfg, { x: { ok: false, status: 0, ms: 1, error: "e" } }), "s", PAGE);
+  assert.match(t, /Сайт &lt;&amp;&gt; тест/);
+  assert.match(t, /<i>a &lt; b &amp; c &gt; d<\/i>/);
+  assert.doesNotMatch(t.replace(/<\/?(b|i|pre)>|<a href="[^"]*">|<\/a>/g, ""), /[<>]/, "сырых < > вне наших тегов нет");
+});
+
+test("длина: боевое табло далеко от 4096; разросшееся — режет пометки, а не таблицу", () => {
+  assert.ok(text({ app: up(), lb1: up(), lb2: up() }, RU()).length < 1500);
+  const many = { groups: [{ id: "u", title: "T", kind: "http", say: { down: "ф".repeat(5000) }, rows: [{ id: "x", name: "Сайт" }] }] };
+  const t = boardText(evaluate(many, { x: { ok: false, status: 0, ms: 1, error: "e" } }), "s", PAGE);
+  assert.ok(t.length <= TELEGRAM_LIMIT);
+  assert.match(t, /<pre>[\s\S]*Сайт[\s\S]*<\/pre>/);
+  assert.match(t, /пометки не поместились/);
 });
 
 /* ── РАСПИСАНИЕ ПРАВОК ───────────────────────────────────────────────────────────────────── */

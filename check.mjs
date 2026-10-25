@@ -438,7 +438,7 @@ console.log(`аватар: наблюдаем «${avatar.observed}», на ка�
  * сообщение с номером `id - 1` вслепую, и с появлением табла этим соседом может оказаться оно
  * само. Довод целиком — в `avatar.mjs`.
  */
-const board = await syncBoard(view, stamp, STATUS_PAGE, { changed, matrix });
+const board = await syncBoard(view, stamp, STATUS_PAGE, { changed, mesh: meshed.mesh });
 console.log(`табло: ${board.mode}${board.messageId ? ` (№${board.messageId})` : ""} — ${board.why}`);
 
 /* Признак «коммитить ли» отдаётся оболочке ЯВНО, а не выводится ею из текста вывода: разбор

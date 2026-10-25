@@ -21,7 +21,7 @@
  * отправлялось бы новое табло, и лечение оказалось бы хуже болезни.
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { icon, privateName } from "./layout.mjs";
+import { icon } from "./layout.mjs";
 import { signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
 import { describeError } from "./error-detail.mjs";
 
@@ -54,41 +54,84 @@ export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 5)
  * цвет авы: «что считать медленным» обязано жить в одном месте, иначе табло и ава однажды скажут
  * разное об одном и том же прогоне, и правым будет выглядеть тот, на кого смотрят.
  */
-export function boardText(view, stamp, statusPage, matrix = []) {
+export function boardText(view, stamp, statusPage, mesh = null) {
   /**
-   * ПО ГРУППАМ, КАК НА СТРАНИЦЕ (25.10.2026), НО С ПРОВАЙДЕРАМИ И ПРИЧИНАМИ. Страница публичная и
-   * говорит только «работает / не работает»; табло читает владелец, и ему надо понимать, кто есть
-   * кто: «Балансировщик 2 (Yandex Cloud) · не отвечает (connect ETIMEDOUT)».
+   * ТАБЛИЦЕЙ (решение владельца 26.10.2026: «простыня с провайдерами» не читалась). Строки — цели,
+   * колонки — значок, имя, время ответа из Европы (NL) и из России (голоса балансировщиков:
+   * прод — для «API» и «Базы данных и кэша», соседняя дверь — для балансировщика). Где из России
+   * замера нет — «—». Ровные колонки — в <pre>: Telegram рисует его моноширинным.
    *
-   * Причина, а не только значок: «не отвечает» и «отвечает пятисоткой» лечатся по-разному, а
-   * человек, открывший канал, решает, идти ли ему работать.
+   * ⚠️ ПРОВАЙДЕРОВ И АДРЕСОВ ЗДЕСЬ НЕТ — они в событийных сообщениях «Сбой / Внимание». Причины
+   * отказов — тоже там; здесь слово («нет», «код 502») и фраза группы под таблицей.
+   * ⚠️ Раздел «Кто кого видит» снят — его заменяет колонка RU.
    */
-  const line = (r) => `${icon(r)} ${esc(privateName(r))} · ${esc(r.state === "up" ? r.detail : `${r.word} — ${r.detail}`)}`;
-  const blocks = view.groups.map((g) => {
-    // Группа из одной строки с тем же именем («Сертификат») — одной строкой с
-    // жирным именем: заголовок над единственной строкой того же имени — повтор.
-    if (g.rows.length === 1 && g.rows[0].name === g.title) {
-      const r = g.rows[0];
-      const text = r.state === "up" ? r.detail : `${r.word} — ${r.detail}`;
-      return [`${icon(r)} <b>${esc(g.title)}</b> · ${esc(text)}`, ...(g.summary ? [esc(g.summary)] : [])].join("\n");
-    }
-    const out = [`<b>${esc(g.title)}</b>`, ...g.rows.map(line)];
-    if (g.summary) out.push(esc(g.summary));
-    return out.join("\n");
-  });
+  const rows = view.groups.flatMap((g) => g.rows);
+  const ru = ruTable(mesh);
+  const cells = rows.map((r) => [icon(r), r.name, nlCell(r), ruCell(r, ru)]);
+  const nameW = Math.max(4, ...cells.map((c) => c[1].length));
+  const nlW = Math.max(2, ...cells.map((c) => c[2].length));
+  const ruW = Math.max(2, ...cells.map((c) => c[3].length));
+  // Значок — эмодзи, его ширина в моноширинном шрифте одинакова у всех строк; в шапке — два пробела.
+  const line = (ic, name, nl, ruv) => `${ic} ${name.padEnd(nameW)}  ${nl.padStart(nlW)}  ${ruv.padStart(ruW)}`;
+  const table = [line("  ", "Цель", "NL", "RU"), ...cells.map((c) => line(...c))].join("\n");
 
-  // «Кто кого видит» (mesh.mjs): мс по точкам и пометки «из Европы не видно, из России видно».
-  const seen = matrix.length ? ["", "<b>Кто кого видит</b>", ...matrix.map(esc)] : [];
+  // Под таблицей — то, что требует слов: фразы групп («вход работает через второй») и пометки точек.
+  const notes = view.groups.filter((g) => g.summary).map((g) => `<i>${esc(g.summary)}</i>`);
+  if (mesh?.notes?.ruUp?.length) notes.push(`<i>Из Европы не видно, из России видно: ${esc(mesh.notes.ruUp.join(", "))}</i>`);
+  if (mesh?.notes?.cutoff) notes.push("<i>Из Европы нет связи с Россией — показано прежнее состояние</i>");
 
-  return [
+  const text = [
     "<b>DentBoard — состояние</b>",
-    `Проверено ${stamp} МСК`,
+    `Проверено ${esc(stamp)} МСК`,
     "",
-    blocks.join("\n\n"),
-    ...seen,
+    `<pre>${esc(table)}</pre>`,
+    ...(notes.length ? ["", ...notes] : []),
     "",
     `<a href="${statusPage}">Подробности и история</a>`,
   ].join("\n");
+  // Предел Telegram — 4096 символов. Таблица из десяти строк до него далеко; если однажды дорастёт —
+  // режем пометки, а не таблицу, и говорим об этом словами, а не обрывом разметки.
+  if (text.length <= TELEGRAM_LIMIT) return text;
+  return [
+    "<b>DentBoard — состояние</b>",
+    `Проверено ${esc(stamp)} МСК`,
+    "",
+    `<pre>${esc(table)}</pre>`,
+    "<i>пометки не поместились — см. страницу</i>",
+    `<a href="${statusPage}">Подробности и история</a>`,
+  ].join("\n");
+}
+
+/** Предел длины сообщения Telegram (после разбора разметки; считаем с запасом — по исходнику). */
+export const TELEGRAM_LIMIT = 4096;
+
+/** NL — время ответа строки или слово: «нет» (не ответила), «код 502», DNS — «4/4», сертификат — «89 дн». */
+function nlCell(r) {
+  if (r.kind === "cert") return typeof r.days === "number" ? `${r.days} дн` : r.state === "unknown" ? "—" : r.word;
+  if (r.kind === "dns") {
+    const m = /ответили (\d+) из (\d+)/.exec(r.shownDetail ?? r.detail ?? "");
+    return m ? `${m[1]}/${m[2]}` : r.state === "up" ? "да" : "нет";
+  }
+  if (r.state === "unknown") return "—";
+  if (r.state === "down") return r.status ? `код ${r.status}` : "нет";
+  return typeof r.ms === "number" ? `${r.ms} мс` : "нет";
+}
+
+/** Замеры из России по свежим голосам: прод (меньший из двух) и каждая дверь глазами соседа. */
+export function ruTable(mesh) {
+  const out = { prod: null, peers: {} };
+  for (const v of mesh?.votes ?? []) {
+    if (!v.fresh) continue;
+    if (v.prod?.code === "200" && typeof v.prod.ms === "number") out.prod = out.prod === null ? v.prod.ms : Math.min(out.prod, v.prod.ms);
+    if (v.peer?.addr) out.peers[v.peer.addr] = v.peer.state === "up" ? (typeof v.peer.ms === "number" ? `${v.peer.ms} мс` : "да") : "нет";
+  }
+  return out;
+}
+
+function ruCell(r, ru) {
+  if (r.kind === "balancer") return (r.ip && ru.peers[r.ip]) || "—";
+  if (r.kind === "ready" || (r.kind === "http" && r.id === "api")) return ru.prod === null ? "—" : `${ru.prod} мс`;
+  return "—";
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -198,10 +241,10 @@ async function sendAndPin(token, chat, text) {
  * `edited` · `sent` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
  * «Telegram отказал» в одно значение, а они требуют разных действий.
  */
-export async function syncBoard(view, stamp, statusPage, { changed = false, matrix = [] } = {}) {
+export async function syncBoard(view, stamp, statusPage, { changed = false, mesh = null } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
-  const nextText = boardText(view, stamp, statusPage, matrix);
+  const nextText = boardText(view, stamp, statusPage, mesh);
   if (!token || !chat) {
     // Текст печатается: журнал частный, а подменный круг без него не показал бы, что встало бы в канал.
     console.log("[табло] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — табло не трогаем. Текст:");

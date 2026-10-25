@@ -336,7 +336,7 @@ test("текст в канал: провайдер и адрес — есть; �
   const v = view({ lb2: dead() });
   const [msg] = alertTexts(transitions(v, previousStates(asPrev(view()), CONFIG), NOW), v, "25.10, 21:00", "https://status.dentboard.ru");
   assert.match(msg, /^🟡 <b>Внимание: Балансировщик 2<\/b>/);
-  assert.match(msg, /Балансировщик 2 \(Yandex Cloud, 153\.51\.113\.60\): не отвечает — connect ETIMEDOUT/);
+  assert.match(msg, /<b>Балансировщик 2<\/b> \(Yandex Cloud, 153\.51\.113\.60\): не отвечает — connect ETIMEDOUT/);
   assert.match(msg, /вход работает через второй/);
 });
 
@@ -532,12 +532,13 @@ test("ЗДЕСЬ СКРЫВАТЬ НЕЧЕГО: подтверждённый с�
     { door: "lb2", ok: false, error: "connect ETIMEDOUT" },
   ] };
   const r = rounds([{}, { lb2: dead(), cert: lost }, { lb2: dead(), cert: lost }]);
-  assert.match(boardText(r[2].v, "25.10, 22:42", "x"), /Балансировщик 2 \(Yandex Cloud, 153\.51\.113\.60\): не проверен/);
+  // Табло (с 26.10.2026 — таблица без провайдеров) про это не пишет; подробность — в строке сертификата.
+  assert.match(row(r[2].v, "cert").detail, /Балансировщик 2 \(Yandex Cloud, 153\.51\.113\.60\): не проверен/);
 });
 
 test("удержанная строка повторяет прежний вид: «ответили 2 из 2» у DNS, 🟡 у медленного балансировщика", () => {
   const [, held] = rounds([{}, { dns2: dnsSilent() }]);
-  assert.match(boardText(held.v, "t", "x"), /DNS 2 \(Яндекс\) · ответили 2 из 2/);
+  assert.match(boardText(held.v, "t", "x"), /✅ DNS 2\s+2\/2/);
   const [, slowHeld] = rounds([{ lb2: up(9000) }, { lb2: dead() }]);
   assert.equal(row(slowHeld.v, "lb2").slow, true);
 });

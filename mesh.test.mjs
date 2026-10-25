@@ -115,7 +115,11 @@ test("ТОЛЬКО NL НЕ ВИДИТ (порвана дорога NL→РФ): �
   assert.equal(r.v.overall, "up");
   for (const id of ["app", "portal", "site", "server", "lb1", "lb2"]) assert.equal(row(r.v, id).state, "up", id);
   assert.match(r.matrix.join("\n"), /Из Европы не видно, из России видно: Кабинет лаборатории/);
-  assert.match(boardText(r.v, "t", "x", r.matrix), /Россия · балансировщик 1: прод 45 мс · балансировщик 2 12 мс · дом в резерве/);
+  // Табло (26.10.2026) — таблица: из Европы «нет», из России — замер; пометка курсивом под таблицей.
+  const board = boardText(r.v, "t", "x", r.mesh);
+  assert.match(board, /✅ Балансировщик 2\s+нет\s+12 мс/);
+  assert.match(board, /✅ База данных и кэш\s+нет\s+45 мс/);
+  assert.match(board, /<i>Из Европы не видно, из России видно: Кабинет лаборатории/);
 });
 
 test("ЗДЕСЬ ТРЕВОГА ОБЯЗАНА БЫТЬ: никто не видит (NL без ответа, обе двери — прод down) — «Сбой» сразу", () => {
