@@ -266,8 +266,7 @@ export function applyMesh(config, raw, { fetched = {}, controlsOk = false, nowSe
   // отказом ключа), любая наша цель ответила хоть чем-то.
   const timedKinds = new Set(["http", "ready", "balancer"]);
   const ourAnswered = config.groups
-    .filter((g) => timedKinds.has(g.kind))
-    .some((g) => g.rows.some((row) => ["ok", "http"].includes(nlSaw(raw[row.id]))));
+    .some((g) => g.rows.some((row) => timedKinds.has(row.kind ?? g.kind) && ["ok", "http"].includes(nlSaw(raw[row.id]))));
   const doorAnswered = votes.some((v) => ["ok", "auth", "hostkey", "refused", "bad"].includes(v.reach));
   const roadOk = controlsOk || doorAnswered || ourAnswered;
 
@@ -276,9 +275,10 @@ export function applyMesh(config, raw, { fetched = {}, controlsOk = false, nowSe
   for (const g of config.groups) {
     for (const row of g.rows) {
       const r = raw[row.id];
-      if (timedKinds.has(g.kind)) {
+      const kind = row.kind ?? g.kind;
+      if (timedKinds.has(kind)) {
         const saw = nlSaw(r);
-        const ru = ruEvidence(row, g.kind, votes, g.kind === "balancer" ? ipOf(row.id) : null);
+        const ru = ruEvidence(row, kind, votes, kind === "balancer" ? ipOf(row.id) : null);
         const d = decideRow(saw, ru, roadOk);
         if (d.verdict === "ru-up") {
           out[row.id] = { ...r, viaRU: true, ruText: ru.up.join(", "), nlError: r?.error ?? null };
@@ -311,10 +311,11 @@ export function matrixLines(config, rawBeforeMesh, mesh) {
   if (!mesh) return [];
   const self = config.mesh?.self ?? { name: "NL", region: "Европа" };
   const balancers = config.groups.find((g) => g.kind === "balancer")?.rows ?? [];
-  const server = config.groups.find((g) => g.kind === "ready")?.rows?.[0];
+  // Сервер — его строки живости и готовности («API», «База данных и кэш»), по виду строки.
+  const serverRows = config.groups.flatMap((g) => g.rows.map((row) => ({ row, kind: row.kind ?? g.kind }))).filter((x) => x.kind === "ready" || (x.kind === "http" && x.row.id === "api"));
   const seen = (r) => (!r ? "не проверен" : r.ok ? (typeof r.ms === "number" ? `${r.ms} мс` : "отвечает") : r.status ? `код ${r.status}` : "не отвечает");
   const nlParts = [];
-  if (server) nlParts.push(`сервер ${seen(rawBeforeMesh[server.id])}`);
+  for (const { row } of serverRows) nlParts.push(`${row.id === "api" ? "API" : "готовность"} ${seen(rawBeforeMesh[row.id])}`);
   for (const b of balancers) nlParts.push(`${b.name.toLowerCase()} ${seen(rawBeforeMesh[b.id])}`);
   const lines = [`${self.region} · ${self.name}: ${nlParts.join(" · ")}`];
   const nameOfIp = (ip) => balancers.find((b) => b.ip === ip)?.name.toLowerCase() ?? ip;

@@ -69,6 +69,7 @@ const healthy = () => ({
   lb2: up(130),
   dns1: dnsOk(4),
   dns2: dnsOk(2),
+  api: up(180),
   server: ready(),
   cert: cert(),
 });
@@ -87,7 +88,7 @@ test("всё здорово — все группы зелёные, свод «u
 
 test("боевой список: пять групп в заданном порядке, имена строк без провайдеров", () => {
   const v = view();
-  assert.deepEqual(v.groups.map((g) => g.title), ["Для пользователей", "Балансировщики", "DNS", "Сервер и база", "Сертификат"]);
+  assert.deepEqual(v.groups.map((g) => g.title), ["Для пользователей", "Сервер", "Балансировщики", "DNS", "Сертификат"]);
   assert.deepEqual(group(v, "balancers").rows.map((r) => r.name), ["Балансировщик 1", "Балансировщик 2"]);
   assert.deepEqual(group(v, "dns").rows.map((r) => r.name), ["DNS 1", "DNS 2"]);
 });
@@ -277,7 +278,7 @@ test("адреса вырезаются из причины отказа", () =>
 
 test("`current` — страницы и сервер с ok/ms; балансировщиков, DNS и сертификата там нет", () => {
   const cur = compatCurrent(view({ portal: dead() }), { now: NOW });
-  assert.deepEqual(Object.keys(cur), ["Кабинет лаборатории", "Кабинет заказчика", "Сайт", "Сервер и база"]);
+  assert.deepEqual(Object.keys(cur), ["Кабинет лаборатории", "Кабинет заказчика", "Сайт", "API", "База данных и кэш"]);
   assert.equal(cur["Кабинет лаборатории"].ok, true);
   assert.equal(typeof cur["Кабинет лаборатории"].ms, "number");
   assert.equal(cur["Кабинет заказчика"].ok, false);
@@ -409,11 +410,11 @@ test("«не проверен» не стирает прошлое: сертиф
   assert.ok(moved.down.some((x) => x.row.name === "Сертификат"), "«Сбой: Сертификат» обязан уйти");
 });
 
-test("первый круг после выката: «Сервер и база» помнит прошлое «API и его зависимости»", () => {
+test("первый круг после выката: «База данных и кэш» помнит прошлое «API и его зависимости» (раскладка до 25.10)", () => {
   const prev = previousStates({ current: { ...OLD.current, "API и его зависимости": { ok: false } }, events: [] }, CONFIG);
   assert.equal(prev.server, "down");
   const moved = transitions(view(), prev, NOW);
-  assert.deepEqual(moved.up.map((x) => x.row.name), ["Сервер и база"]);
+  assert.deepEqual(moved.up.map((x) => x.row.name), ["База данных и кэш"]);
 });
 
 test("адреса IPv6 вырезаются; время вида 10:30:00 — нет", () => {
@@ -546,4 +547,57 @@ test("давно не было круга (наблюдатель стоял) �
   assert.deepEqual(previousRows(prev), {});
   const fresh = { layout: LAYOUT, groups: [{ rows: [{ id: "x", state: "up" }] }], updatedAt: new Date().toISOString() };
   assert.equal(previousRows(fresh).x.state, "up");
+});
+
+/* ── «вынеси api отдельно» (26.10.2026): переход с «Сервер и база» на «API» + «База данных и кэш» ── */
+
+/** История, которую пишет боевой круг ДО этой правки: одна строка `server` «Сервер и база», без `api`. */
+const BEFORE_SPLIT = (serverState = "up") => ({
+  layout: LAYOUT,
+  groups: [{ id: "server", title: "Сервер и база", state: serverState, rows: [{ id: "server", name: "Сервер и база", state: serverState, word: "работают" }] }],
+  current: { "Сервер и база": { ok: serverState === "up" } },
+  updatedAt: new Date().toISOString(),
+});
+
+test("ПЕРВЫЙ КРУГ ПОСЛЕ РАЗДЕЛЕНИЯ: ни «упало», ни «поднялось» по «API» и «Базе данных и кэше»", () => {
+  const moved = transitions(view(), previousStates(BEFORE_SPLIT("up"), CONFIG), NOW);
+  assert.equal(moved.events.length, 0);
+});
+
+test("ПЕРВЫЙ КРУГ ПОСЛЕ РАЗДЕЛЕНИЯ: «API» лежит с первого круга — события нет (прошлого у новой строки нет)", () => {
+  const moved = transitions(view({ api: dead() }), previousStates(BEFORE_SPLIT("up"), CONFIG), NOW);
+  assert.equal(moved.events.length, 0);
+});
+
+test("«База данных и кэш» помнит прошлое «Сервер и база» (тот же id): лежала — поднялась → «Работает»", () => {
+  const moved = transitions(view(), previousStates(BEFORE_SPLIT("down"), CONFIG), NOW);
+  assert.deepEqual(moved.up.map((x) => x.row.name), ["База данных и кэш"]);
+});
+
+test("ЗДЕСЬ СОБЫТИЯ БЫТЬ НЕ ДОЛЖНО: «Сервер и база» лежала и «База данных и кэш» лежит", () => {
+  const body = JSON.stringify({ status: "error", checks: { postgres: { up: false }, redis: { up: true } } });
+  const moved = transitions(view({ server: { ok: false, status: 503, ms: 30, body } }), previousStates(BEFORE_SPLIT("down"), CONFIG), NOW);
+  assert.equal(moved.events.length, 0);
+});
+
+test("раскладка до 25.10 (только current): «API» помнит «API», «База данных и кэш» — «API и его зависимости»", () => {
+  const prev = previousStates({ current: { API: { ok: false }, "API и его зависимости": { ok: false } }, events: [] }, CONFIG);
+  assert.equal(prev.api, "down");
+  assert.equal(prev.server, "down");
+});
+
+test("группа «Сервер»: лёг только API — группа жёлтая, свод «Есть проблемы», «Сбой: API»", () => {
+  const v = view({ api: dead() });
+  assert.equal(group(v, "server").state, "warn");
+  assert.equal(v.overall, "slow");
+  const moved = transitions(v, previousStates(asPrev(view()), CONFIG), NOW);
+  assert.deepEqual(moved.down.map((x) => x.row.name), ["API"]);
+});
+
+test("кабинеты (parseStatus в ztl-lab): в current — «API» и «База данных и кэш» с ok и ms", () => {
+  const cur = compatCurrent(view(), { now: NOW });
+  assert.equal(cur.API.ok, true);
+  assert.equal(typeof cur.API.ms, "number");
+  assert.equal(cur["База данных и кэш"].ok, true);
+  assert.equal(cur["Сервер и база"], undefined);
 });

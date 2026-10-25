@@ -25,7 +25,7 @@ const when = (iso) =>
   new Date(iso).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", dateStyle: "short", timeStyle: "short" });
 
 /**
- * ГРУППЫ (25.10.2026) — «Для пользователей», «Балансировщики», «DNS», «Сервер и база» (и
+ * ГРУППЫ (25.10.2026) — «Для пользователей», «Балансировщики», «DNS», «Сервер» (и
  * «Сертификат» в истории — на странице не рисуется, см. `onPage` ниже). Порядок и тексты — из `history.json`, а он из `targets.json`: страница их не
  * придумывает, иначе подпись на странице и строка в канале разошлись бы молча.
  *
@@ -92,11 +92,30 @@ function subtitle(state, note, stamp) {
  * что сказано в истории.
  */
 let configOff = [];
+let configCollapse = [];
 try {
   const config = JSON.parse(readFileSync(process.env.STATUS_TARGETS ?? "targets.json", "utf8"));
   configOff = config.groups.filter((g) => g.onPage === false).map((g) => g.id);
+  // Группы ОДНОЙ строкой со счётом (26.10.2026) — тоже по списку целей: в истории этого признака нет.
+  configCollapse = config.groups.filter((g) => g.collapse === true).map((g) => g.id);
 } catch {
   configOff = [];
+  configCollapse = [];
+}
+
+/**
+ * СЧЁТ СВЁРНУТОЙ ГРУППЫ (решение владельца 26.10.2026): «2 из 2 работают» / «1 из 2 работает» /
+ * «не работают» — единственное число на странице, которое он хочет видеть. Считаются проверенные
+ * строки; не проверено ни одной — «не проверены». Скрипт живого обновления получает эту же функцию
+ * исходником.
+ */
+function countWord(rows) {
+  const known = rows.filter((r) => r && r.state !== "unknown");
+  if (known.length === 0) return "не проверены";
+  const up = known.filter((r) => r.state === "up").length;
+  if (up === 0) return "не работают";
+  const n = up % 10 === 1 && up % 100 !== 11 ? "работает" : "работают";
+  return up + " из " + known.length + " " + n;
 }
 const hiddenGroup = (g) => g.onPage === false || configOff.includes(g.id);
 const shown = groups.filter((g) => !hiddenGroup(g));
@@ -128,9 +147,28 @@ const WARN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 let delay = 100;
 const cards = shown
   .map((g) => {
+    if (configCollapse.includes(g.id)) {
+      // Одна строка: имя группы и счёт. Отдельных «Балансировщик 1/2», «DNS 1/2» на странице нет —
+      // они в канале и табло, с провайдерами и мс. Цвет — состояние группы: 2/2 зелёное, 1/2 жёлтое
+      // («работает частично», заголовок страницы при этом не тревожный — резерв), 0/2 красное.
+      const card = `
+  <section class="card nf-in" style="animation-delay:${delay}ms" data-group="${esc(g.id)}" data-collapse>
+    <ul>
+      <li class="row">
+        <span class="row-name">${esc(g.title)}</span>
+        <span class="row-state ${ROW_CLASS[g.state] ?? "is-unknown"}" data-collapse-state>
+          <span class="dot" aria-hidden="true"></span><span class="row-word" data-collapse-word>${esc(countWord(g.rows))}</span>
+        </span>
+      </li>
+    </ul>
+    <p class="group-note ${ROW_CLASS[g.state] ?? "is-unknown"}" data-group-note${g.summary ? "" : " hidden"}>${g.summary ? esc(g.summary) : ""}</p>
+  </section>`;
+      delay += 40;
+      return card;
+    }
     const multi = g.rows.length > 1;
     const showState = multi && g.state !== "up";
-    // Группа из одной строки с тем же именем («Сервер и база») — без шапки: заголовок
+    // Группа из одной строки с тем же именем — без шапки: заголовок
     // над единственной строкой того же имени — тот самый дубль, на который жаловался владелец.
     const headless = g.rows.length === 1 && g.rows[0].name === g.title;
     const head = headless
@@ -445,6 +483,11 @@ ${historyBlock}
         note.textContent = grp.summary || "";
         note.hidden = !grp.summary;
       }
+      // Свёрнутая группа — одна строка со счётом («2 из 2 работают»).
+      var cs = card.querySelector("[data-collapse-state]");
+      if (cs) cs.className = "row-state " + (CLS[grp.state] || "is-unknown");
+      var cw = card.querySelector("[data-collapse-word]");
+      if (cw) cw.textContent = countWord(grp.rows);
       for (var i = 0; i < grp.rows.length; i++) {
         var r = grp.rows[i];
         var li = card.querySelector('[data-row="' + r.id + '"]');
@@ -469,6 +512,7 @@ ${historyBlock}
   ${noticeOf.toString()}
   // Та же функция, что собирала страницу на сервере, — вставлена её исходником, не копией.
   ${subtitle.toString()}
+  ${countWord.toString()}
   function tick() {
     fetch("data/history.json", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })

@@ -64,6 +64,7 @@ export function readiness(body) {
       dbUp: pg?.up === true,
       dbMs: typeof pg?.latency_ms === "number" ? pg.latency_ms : null,
       redisUp: rd?.up === true,
+      redisMs: typeof rd?.latency_ms === "number" ? rd.latency_ms : null,
     };
   } catch {
     return null;
@@ -72,7 +73,7 @@ export function readiness(body) {
 
 /**
  * Ответил ли балансировщик САМ: довёл запрос до сервера. 200 — да; 503 с телом готовности — тоже да
- * (сервер не готов, но это дело строки «Сервер и база»); 503 без тела, 502, 504 — нет.
+ * (сервер не готов, но это дело строки «База данных и кэш»); 503 без тела, 502, 504 — нет.
  */
 export function balancerAccepts(status, body) {
   return status === 200 || (status === 503 && readiness(body) !== null);
@@ -80,7 +81,9 @@ export function balancerAccepts(status, body) {
 
 /** Одна строка из сырой пробы. Возвращает `{ id, name, kind, state, word, value, ms, slow, detail }`. */
 export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}) {
-  const base = { id: row.id, name: row.name, kind: group.kind, label: row.label ?? null, ip: row.ip ?? null };
+  // Вид пробы — у строки, если задан (группа «Сервер»: API — живость, база и кэш — готовность), иначе у группы.
+  const kind = row.kind ?? group.kind;
+  const base = { id: row.id, name: row.name, kind: kind, label: row.label ?? null, ip: row.ip ?? null };
   if (!r) return { ...base, state: "unknown", word: "не проверен", value: null, ms: null, slow: false, detail: "проба не выполнялась" };
   // NL отрезан от России (mesh.mjs): это не наблюдение — `hold` покажет прежнее состояние.
   if (r.cutoff) {
@@ -88,11 +91,11 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
     return { ...base, state: "unknown", word: "не проверен", value: null, ms: null, slow: false, detail: `из Европы нет связи с Россией${why}`, cutoff: true };
   }
   // Из Европы не видно, из России видно (mesh.mjs): строка работает — людям она открывается.
-  if (r.viaRU && (group.kind === "http" || group.kind === "balancer" || group.kind === "ready")) {
+  if (r.viaRU && (kind === "http" || kind === "balancer" || kind === "ready")) {
     return {
       ...base,
       state: "up",
-      word: group.kind === "ready" ? "работают" : "работает",
+      word: kind === "ready" ? "работают" : "работает",
       value: null,
       ms: null,
       slow: false,
@@ -104,11 +107,11 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
   // Отказ, подтверждённый Россией, — с её словами в подробностях (канал).
   const ruNote = r.ruText ? `; Россия: ${r.ruText}` : "";
 
-  if (group.kind === "http" || group.kind === "balancer") {
+  if (kind === "http" || kind === "balancer") {
     if (r.ok) {
       const slow = typeof r.ms === "number" && r.ms > slowMs;
       // Балансировщик, доведший запрос до неготового сервера (503 с телом готовности), жив —
-      // неготовность называет строка «Сервер и база».
+      // неготовность называет строка «База данных и кэш».
       const note = r.status && r.status !== 200 ? ` (сервер ответил ${r.status})` : "";
       // `shownDetail` — то же, что видит табло, без провайдеров и адресов: удержанная строка (`hold`)
       // повторит его дословно, а не заменит на «работает».
@@ -120,24 +123,28 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
      * адрес только при отказе соединения, а ответ кодом (502, 504, 503 без тела) он показывает
      * человеку. Такой отказ в паре — уже не «резерв», а беда для части людей (ревью 25.10.2026).
      */
-    const misleads = group.kind === "balancer" && Boolean(r.status);
+    const misleads = kind === "balancer" && Boolean(r.status);
     return { ...base, state: "down", word: r.status ? "не работает" : "не отвечает", value: null, ms: null, slow: false, detail: httpWhy(r) + ruNote, status: r.status ?? 0, error: r.error ?? null, misleads };
   }
 
-  if (group.kind === "ready") {
+  if (kind === "ready") {
     const rd = readiness(r.body);
     const db = rd?.dbMs != null ? `база ${rd.dbMs} мс` : null;
+    const cache = rd?.redisMs != null ? `кэш ${rd.redisMs} мс` : null;
     if (r.ok && rd?.status === "ok") {
       const slow = typeof r.ms === "number" && r.ms > slowMs;
-      return { ...base, state: "up", word: "работают", value: db, ms: r.ms, dbMs: rd.dbMs, slow, detail: [`${r.ms} мс`, db].filter(Boolean).join(", "), status: r.status };
+      // Табло: задержка базы и кэша — числа строки «База данных и кэш»; время ответа самого сервера —
+      // у строки «API» (25.10.2026: «вынеси api отдельно»).
+      const shown = [db, cache].filter(Boolean).join(", ") || `${r.ms} мс`;
+      return { ...base, state: "up", word: "работают", value: db, ms: r.ms, dbMs: rd.dbMs, slow, detail: shown, shownDetail: shown, status: r.status };
     }
     const why = [httpWhy(r)];
     if (rd && !rd.dbUp) why.push("база не отвечает");
-    if (rd && !rd.redisUp) why.push("Redis не отвечает");
+    if (rd && !rd.redisUp) why.push("кэш (Redis) не отвечает");
     return { ...base, state: "down", word: "не отвечают", value: null, ms: null, slow: false, detail: why.join(", ") + ruNote, status: r.status ?? 0, error: r.error ?? null };
   }
 
-  if (group.kind === "dns") {
+  if (kind === "dns") {
     const bad = (r.answers ?? []).filter((a) => !a.ok).map((a) => `${a.server}: ${a.error}`);
     const tally = `ответили ${r.answered} из ${r.total}`;
     const detail = [tally, ...bad].join("; ");
@@ -148,7 +155,7 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
     return { ...base, state: "down", word: r.wrong ? "отвечает неверно" : "не отвечает", value: null, ms: null, slow: false, detail, misleads: Boolean(r.wrong) };
   }
 
-  if (group.kind === "cert") {
+  if (kind === "cert") {
     const label = (id) => {
       const b = balancers.find((x) => x.id === id);
       return b ? privateName(b) : id;
@@ -181,7 +188,7 @@ export function evalRow(group, row, r, { slowMs = SLOW_MS, balancers = [] } = {}
     return { ...base, state: "up", word: "действует", value, ms: null, slow: false, detail, days: min };
   }
 
-  return { ...base, state: "unknown", word: "не проверен", value: null, ms: null, slow: false, detail: `неизвестный вид «${group.kind}»` };
+  return { ...base, state: "unknown", word: "не проверен", value: null, ms: null, slow: false, detail: `неизвестный вид «${kind}»` };
 }
 
 /**
@@ -209,7 +216,7 @@ export function groupState(rows) {
  * обесценила бы красную вообще).
  *
  * 🟡 ЖЁЛТЫЙ — ТОЛЬКО КОГДА ПЛОХО ЛЮДЯМ (решение владельца 25.10.2026): не работает страница для
- * пользователей или «Сервер и база»; не работают ОБА балансировщика или ОБА DNS (запаса нет —
+ * пользователей или группа «Сервер»; не работают ОБА балансировщика или ОБА DNS (запаса нет —
  * это уже не резерв); сертификат вот-вот истечёт или чужой (браузер предупредит об опасности);
  * две строки медленнее порога.
  *
@@ -220,7 +227,7 @@ export function groupState(rows) {
  *
  * Медленно — как и раньше, ДВЕ медленные строки, а не одна: одиночный выброс говорит о своей
  * цели, а не о системе. Считаются страницы и сервер; балансировщики — НЕТ: они ходят в тот же
- * `/health/ready`, что и «Сервер и база», и одна медленная готовность засчитывалась бы трижды
+ * `/health/ready`, что и «База данных и кэш», и одна медленная готовность засчитывалась бы трижды
  * (ревью 25.10.2026). Медленный балансировщик виден своим жёлтым числом на странице и в табло.
  */
 export function overallOf(groups) {
@@ -442,8 +449,9 @@ export function publicView(view, latencyOf = () => undefined, prevStates = {}) {
 export function compatCurrent(view, { now, urls = {}, latencyOf = () => undefined }) {
   const out = {};
   for (const g of view.groups) {
-    if (g.kind !== "http" && g.kind !== "ready") continue;
     for (const r of g.rows) {
+      // Вид — у СТРОКИ (группа «Сервер»: API — живость, «База данных и кэш» — готовность).
+      if (r.kind !== "http" && r.kind !== "ready") continue;
       if (r.state === "unknown") continue;
       out[r.name] = { ok: r.state === "up", status: r.status ?? 0, ms: r.ms, checkedAt: now, url: urls[r.id] ?? null, latency: latencyOf(r) ?? null };
     }
@@ -459,8 +467,8 @@ export function compatCurrent(view, { now, urls = {}, latencyOf = () => undefine
  * первый в жизни круг. Иначе выкат в спокойный день разослал бы в канал «работает: Балансировщик
  * 1, Балансировщик 2, DNS 1, …» — пост ни о чём, который учит канал не читать.
  *
- * Строки, жившие и в прежней раскладке (страницы — под тем же именем, «Сервер и база» — под
- * именем из `was`: «API и его зависимости», тот же `/health/ready`), берут прошлое из прежнего
+ * Строки, жившие и в прежней раскладке (страницы — под тем же именем, «База данных и кэш» — под
+ * именами из `was`: «Сервер и база», «API и его зависимости», тот же `/health/ready`; «API» — под «API»), берут прошлое из прежнего
  * `current`: сбой, пришедшийся ровно на выкат, иначе прошёл бы молча.
  */
 export function previousStates(previous, config) {
@@ -472,10 +480,13 @@ export function previousStates(previous, config) {
     return out;
   }
   for (const g of config.groups) {
-    if (g.kind !== "http" && g.kind !== "ready") continue;
     for (const row of g.rows) {
-      const was = previous?.current?.[row.was ?? row.name];
-      if (was && typeof was.ok === "boolean") out[row.id] = was.ok ? "up" : "down";
+      const kind = row.kind ?? g.kind;
+      if (kind !== "http" && kind !== "ready") continue;
+      // Прежние имена строки (`was`, строка или список) — после имени нынешнего; берётся первое найденное.
+      const names = [row.name, ...[].concat(row.was ?? [])];
+      const was = names.map((n) => previous?.current?.[n]).find((x) => x && typeof x.ok === "boolean");
+      if (was) out[row.id] = was.ok ? "up" : "down";
     }
   }
   return out;
@@ -526,7 +537,7 @@ export function transitions(view, prevStates, now) {
         status: r.status ?? null,
         // Причина — только у страниц и сервера, и без адресов: у балансировщиков и DNS она
         // называет провайдера и адрес, а это место публичное.
-        error: g.kind === "http" || g.kind === "ready" ? redact(r.error ?? null) : null,
+        error: r.kind === "http" || r.kind === "ready" ? redact(r.error ?? null) : null,
       });
     }
   }

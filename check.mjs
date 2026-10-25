@@ -138,8 +138,10 @@ const expectIps = [...new Set(balancers.map((b) => b.ip))].sort();
 const httpTargets = [];
 for (const g of config.groups) {
   for (const row of g.rows) {
-    if (g.kind === "http") httpTargets.push({ id: row.id, url: row.url, expect: row.expect });
-    if (g.kind === "ready") httpTargets.push({ id: row.id, url: row.url, expect: row.expect, readBody: true, strict: true });
+    // Вид пробы — у строки, если задан (группа «Сервер»: API — живость, база и кэш — готовность).
+    const kind = row.kind ?? g.kind;
+    if (kind === "http") httpTargets.push({ id: row.id, url: row.url, expect: row.expect });
+    if (kind === "ready") httpTargets.push({ id: row.id, url: row.url, expect: row.expect, readBody: true, strict: true });
     if (g.kind === "balancer") {
       httpTargets.push({
         id: row.id,
@@ -149,7 +151,7 @@ for (const g of config.groups) {
          * 🔴 БАЛАНСИРОВЩИК ЖИВ, ЕСЛИ ДОВЁЛ ЗАПРОС ДО СЕРВЕРА — даже когда тот ответил 503 «не готов»
          * (ревью 25.10.2026). Иначе лежащая база красила бы ОБА балансировщика, страница писала бы
          * «оба балансировщика недоступны — вход не работает», а в канал уходил бы неверный диагноз.
-         * Готовность сервера — дело строки «Сервер и база». 503 БЕЗ тела готовности (заглушка самого
+         * Готовность сервера — дело строки «База данных и кэш». 503 БЕЗ тела готовности (заглушка самого
          * балансировщика), 502, 504, сетевая ошибка — отказ балансировщика.
          */
         accept: balancerAccepts,
@@ -252,6 +254,15 @@ const view = evaluate(config, meshed.raw, { prevRows: previousRows(previous) });
 // «медленно» перестало бы отличаться от «лежит». Ключ — имя строки: у страниц оно прежнее, и
 // накопленное окно переживает смену раскладки.
 const timed = view.groups.flatMap((g) => g.rows).filter((r) => ["http", "balancer", "ready"].includes(r.kind));
+// Окно строки, сменившей имя («Сервер и база» → «База данных и кэш», 26.10.2026), переезжает под
+// новое имя один раз — иначе накопленное за двое суток стёрлось бы ниже вместе со «снятыми целями».
+for (const g of config.groups) {
+  for (const row of g.rows) {
+    if (latency[row.name]) continue;
+    const old = [].concat(row.was ?? []).find((n) => Array.isArray(latency[n]));
+    if (old) latency = { ...latency, [row.name]: latency[old] };
+  }
+}
 // Удержанная строка (`suspect`) показывает ПРОШЛОЕ время — замером оно не является и в окно не идёт.
 for (const r of timed) if (r.state === "up" && !r.suspect && !r.cutoff && typeof r.ms === "number") latency = appendSample(latency, r.name, r.ms);
 // Окна снятых целей («API», «API и его зависимости») не копим вечно: их больше никто не пишет.

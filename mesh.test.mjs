@@ -36,10 +36,10 @@ const certOk = { perDoor: [
   { door: "lb1", ok: true, days: 89, validTo: "2027-01-23T10:19:52.000Z", authorized: true, authorizationError: null },
   { door: "lb2", ok: true, days: 89, validTo: "2027-01-23T10:19:52.000Z", authorized: true, authorizationError: null },
 ] };
-const healthy = () => ({ app: ok(), portal: ok(), site: ok(), lb1: ok(120), lb2: ok(130), dns1: dnsOk(4), dns2: dnsOk(2), server: ready(), cert: certOk });
+const healthy = () => ({ app: ok(), portal: ok(), site: ok(), lb1: ok(120), lb2: ok(130), dns1: dnsOk(4), dns2: dnsOk(2), api: ok(180), server: ready(), cert: certOk });
 /** NL не получил ответа ни от чего в РФ. */
 const isolated = () => ({
-  app: net(), portal: net(), site: net(), lb1: net(), lb2: net(), dns1: dnsSilent(4), dns2: dnsSilent(2), server: net(),
+  app: net(), portal: net(), site: net(), lb1: net(), lb2: net(), dns1: dnsSilent(4), dns2: dnsSilent(2), api: net(), server: net(),
   cert: { perDoor: [{ door: "lb1", ok: false, error: "x" }, { door: "lb2", ok: false, error: "y" }] },
 });
 
@@ -119,11 +119,11 @@ test("ТОЛЬКО NL НЕ ВИДИТ (порвана дорога NL→РФ): �
 });
 
 test("ЗДЕСЬ ТРЕВОГА ОБЯЗАНА БЫТЬ: никто не видит (NL без ответа, обе двери — прод down) — «Сбой» сразу", () => {
-  const r = after({ app: net(), portal: net(), site: net(), server: net() }, both({ "door-1": { prod: "000", prodState: "down" }, "door-2": { prod: "000", prodState: "down" } }));
+  const r = after({ app: net(), portal: net(), site: net(), api: net(), server: net() }, both({ "door-1": { prod: "000", prodState: "down" }, "door-2": { prod: "000", prodState: "down" } }));
   assert.equal(r.v.overall, "down");
-  assert.match(r.texts[0], /^🔴 <b>Сбой: Кабинет лаборатории, Кабинет заказчика, Сайт, Сервер и база<\/b>/);
+  assert.match(r.texts[0], /^🔴 <b>Сбой: Кабинет лаборатории, Кабинет заказчика, Сайт, API, База данных и кэш<\/b>/);
   assert.match(r.texts[0], /Россия: балансировщик 1: прод не отвечает/);
-  assert.match(r.texts[0], /<i>Европа · NL: сервер не отвечает/);
+  assert.match(r.texts[0], /<i>Европа · NL: API не отвечает · готовность не отвечает/);
 });
 
 test("ЗДЕСЬ ТРЕВОГА ОБЯЗАНА БЫТЬ: NL получил 502 от страницы — Россия с живым продом не спасает", () => {

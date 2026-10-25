@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { evaluate, publicView } from "./layout.mjs";
 
 const RENDER = fileURLToPath(new URL("./render.mjs", import.meta.url));
 
@@ -48,11 +49,14 @@ const HISTORY = {
     },
     {
       id: "server",
-      title: "Сервер и база",
+      title: "Сервер",
       onPage: true,
       state: "up",
       summary: null,
-      rows: [{ id: "server", name: "Сервер и база", state: "up", word: "работают", value: "база 3 мс", ms: 240, slow: false }],
+      rows: [
+        { id: "api", name: "API", state: "up", word: "работает", value: "180 мс", ms: 180, slow: false },
+        { id: "server", name: "База данных и кэш", state: "up", word: "работают", value: "база 3 мс", ms: 240, slow: false },
+      ],
     },
     {
       id: "cert",
@@ -119,12 +123,59 @@ test("группы «Сертификат» на странице нет, и е�
 
 test("а слова, группы, фраза под группой и событие балансировщика — на месте", () => {
   const page = visible(render(HISTORY));
-  assert.match(page, /Балансировщик 2/);
-  assert.match(page, /не отвечает/);
-  assert.match(page, /Работает частично/);
   assert.match(page, /вход работает через второй/);
   assert.match(page, /<b>Балансировщик 2<\/b> не отвечает/);
   assert.match(page, /Резерв частично недоступен/);
+});
+
+/* ── свёрнутые группы (26.10.2026): «Балансировщики — 1 из 2 работает» ── */
+
+const rowsOf = (pageHtml, id) => (pageHtml.match(new RegExp(`data-group="${id}"[\\s\\S]*?</section>`)) ?? [""])[0];
+const withBalancers = (states) => ({
+  ...HISTORY,
+  groups: HISTORY.groups.map((g) =>
+    g.id !== "balancers"
+      ? g
+      : { ...g, state: states.every((s) => s === "up") ? "up" : states.every((s) => s === "down") ? "down" : "warn", rows: g.rows.map((r, i) => ({ ...r, state: states[i] })) },
+  ),
+});
+
+test("балансировщики — ОДНОЙ строкой со счётом: 1 из 2 работает, жёлтым; отдельных строк нет", () => {
+  const card = rowsOf(visible(render(withBalancers(["up", "down"]))), "balancers");
+  assert.match(card, /Балансировщики/);
+  assert.match(card, /1 из 2 работает/);
+  assert.match(card, /row-state is-warn/);
+  assert.doesNotMatch(card, /Балансировщик 1|Балансировщик 2|data-row=/);
+});
+
+test("2 из 2 работают — зелёным; 0 из 2 — «не работают», красным", () => {
+  const green = rowsOf(visible(render(withBalancers(["up", "up"]))), "balancers");
+  assert.match(green, /2 из 2 работают/);
+  assert.match(green, /row-state is-up/);
+  const red = rowsOf(visible(render(withBalancers(["down", "down"]))), "balancers");
+  assert.match(red, /не работают/);
+  assert.match(red, /row-state is-down/);
+});
+
+test("ЗДЕСЬ СВОРАЧИВАТЬ НЕ ДОЛЖНО: строки «Для пользователей» и «Сервер» — по одной", () => {
+  const page = visible(render(HISTORY));
+  assert.match(rowsOf(page, "users"), /data-row="app"/);
+  assert.match(rowsOf(page, "server"), /data-row="api"[\s\S]*data-row="server"/);
+  assert.match(rowsOf(page, "server"), /API[\s\S]*База данных и кэш/);
+});
+
+test("порядок групп на странице — из боевого списка: пользователи, сервер, балансировщики, DNS", () => {
+  const config = JSON.parse(readFileSync(TARGETS, "utf8"));
+  const ok = { ok: true, status: 200, ms: 100 };
+  const ready = { ...ok, body: JSON.stringify({ status: "ok", checks: { postgres: { up: true, latency_ms: 1 }, redis: { up: true, latency_ms: 0 } } }) };
+  const dns = { ok: true, wrong: false, answered: 2, total: 2, answers: [] };
+  const raw = { app: ok, portal: ok, site: ok, api: ok, server: ready, lb1: ok, lb2: ok, dns1: dns, dns2: dns };
+  const view = evaluate(config, raw);
+  const page = visible(render({ layout: 2, overall: view.overall, notice: view.notice, groups: publicView(view), current: {}, events: [], updatedAt: "2026-10-26T10:00:00.000Z" }));
+  const order = [...page.matchAll(/data-group="([a-z]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order, ["users", "server", "balancers", "dns"]);
+  assert.match(rowsOf(page, "dns"), /2 из 2 работают/);
+  assert.match(rowsOf(page, "balancers"), /2 из 2 работают/);
 });
 
 test("история ПРЕЖНЕГО кода (без onPage): сертификата на странице всё равно нет — ни карточки, ни события, ни оговорки", () => {

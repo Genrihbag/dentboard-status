@@ -65,7 +65,7 @@ export function boardText(view, stamp, statusPage, matrix = []) {
    */
   const line = (r) => `${icon(r)} ${esc(privateName(r))} · ${esc(r.state === "up" ? r.detail : `${r.word} — ${r.detail}`)}`;
   const blocks = view.groups.map((g) => {
-    // Группа из одной строки с тем же именем («Сервер и база», «Сертификат») — одной строкой с
+    // Группа из одной строки с тем же именем («Сертификат») — одной строкой с
     // жирным именем: заголовок над единственной строкой того же имени — повтор.
     if (g.rows.length === 1 && g.rows[0].name === g.title) {
       const r = g.rows[0];
