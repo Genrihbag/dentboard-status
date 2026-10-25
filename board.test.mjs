@@ -200,3 +200,29 @@ test("битая отметка времени НЕ запирает табло 
   });
   assert.equal(d.act, "edit");
 });
+
+/* ── правки по ревью табло (26.10.2026) ── */
+
+test("сосед с лежащей своей сетью (прод unknown) про балансировщик не говорит — RU «—», а не «нет»", () => {
+  const mesh = { votes: [{ fresh: true, prod: { state: "unknown", code: "000", ms: null }, peer: { addr: "136.234.13.100", state: "unreachable", ms: null } }], notes: {} };
+  assert.match(lineOf(text({ app: up(), lb1: up(120), lb2: up() }, mesh), "Балансировщик 1"), /120 мс\s+—$/);
+});
+
+test("удержанная строка (первый сбой) — RU «—»: свежий русский замер не выдаёт удержанное", () => {
+  const v = evaluate(CONFIG, { app: up(), lb1: up(), lb2: up() }, { slowMs: 1500 });
+  const lb2 = v.groups[1].rows[1];
+  Object.assign(lb2, { suspect: "down", suspectRounds: 1 });
+  assert.match(lineOf(boardText(v, STAMP, PAGE, RU({ peer2: "unreachable" })), "Балансировщик 2"), /—$/);
+});
+
+test("прод из России лежит у обеих дверей — RU «нет», а не «—» (замер есть)", () => {
+  const cfg = { groups: [{ id: "server", title: "Сервер", kind: "ready", rows: [{ id: "api", name: "API", kind: "http" }, { id: "server", name: "База данных и кэш" }] }] };
+  const mesh = { votes: [{ fresh: true, prod: { state: "down", code: "000", ms: null } }, { fresh: true, prod: { state: "down", code: "503", ms: 30 } }], notes: {} };
+  const t = boardText(evaluate(cfg, { api: up(), server: { ok: false, status: 503, ms: 30 } }), STAMP, PAGE, mesh);
+  assert.match(lineOf(t, "API"), /(нет|код 503)$/);
+});
+
+test("непроверенный DNS — «—», а не «нет» (не выглядит отказом)", () => {
+  const cfg = { groups: [{ id: "dns", title: "DNS", kind: "dns", rows: [{ id: "d1", name: "DNS 1" }] }] };
+  assert.match(lineOf(boardText(evaluate(cfg, {}), STAMP, PAGE), "DNS 1"), /^⚪ DNS 1\s+—\s+—$/);
+});

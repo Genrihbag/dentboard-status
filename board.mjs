@@ -67,7 +67,7 @@ export function boardText(view, stamp, statusPage, mesh = null) {
    */
   const rows = view.groups.flatMap((g) => g.rows);
   const ru = ruTable(mesh);
-  const cells = rows.map((r) => [icon(r), r.name, nlCell(r), ruCell(r, ru)]);
+  const cells = rows.map((r) => [icon(r), r.name, nlCell(r), ruCell(r, ru, view)]);
   const nameW = Math.max(4, ...cells.map((c) => c[1].length));
   const nlW = Math.max(2, ...cells.map((c) => c[2].length));
   const ruW = Math.max(2, ...cells.map((c) => c[3].length));
@@ -107,30 +107,60 @@ export const TELEGRAM_LIMIT = 4096;
 
 /** NL — время ответа строки или слово: «нет» (не ответила), «код 502», DNS — «4/4», сертификат — «89 дн». */
 function nlCell(r) {
-  if (r.kind === "cert") return typeof r.days === "number" ? `${r.days} дн` : r.state === "unknown" ? "—" : r.word;
+  if (r.state === "unknown") return "—";
+  if (r.kind === "cert") {
+    // Удержанный сертификат (layout.mjs, первый сбой балансировщиков) несёт дни только в value —
+    // берём оттуда, чтобы ячейка не менялась с «89 дн» на «действует» (ревью 26.10.2026).
+    const d = typeof r.days === "number" ? r.days : Number((/осталось (\d+)/.exec(r.value ?? "") ?? [])[1]);
+    if (Number.isFinite(d)) return d < 0 ? "истёк" : `${d} дн`;
+    return r.word;
+  }
   if (r.kind === "dns") {
     const m = /ответили (\d+) из (\d+)/.exec(r.shownDetail ?? r.detail ?? "");
     return m ? `${m[1]}/${m[2]}` : r.state === "up" ? "да" : "нет";
   }
-  if (r.state === "unknown") return "—";
   if (r.state === "down") return r.status ? `код ${r.status}` : "нет";
   return typeof r.ms === "number" ? `${r.ms} мс` : "нет";
 }
 
-/** Замеры из России по свежим голосам: прод (меньший из двух) и каждая дверь глазами соседа. */
+/**
+ * Замеры из России по свежим голосам: прод (меньший из ответивших 200; ни один не 200 — «нет» или
+ * код) и каждая дверь глазами соседа. Голос двери с лежащей своей сетью (прод `unknown`) про соседа
+ * не говорит — его «сосед не отвечает» про её сеть (то же правило, что в mesh.mjs ruEvidence).
+ */
 export function ruTable(mesh) {
   const out = { prod: null, peers: {} };
+  let prodSeen = null;
   for (const v of mesh?.votes ?? []) {
     if (!v.fresh) continue;
-    if (v.prod?.code === "200" && typeof v.prod.ms === "number") out.prod = out.prod === null ? v.prod.ms : Math.min(out.prod, v.prod.ms);
-    if (v.peer?.addr) out.peers[v.peer.addr] = v.peer.state === "up" ? (typeof v.peer.ms === "number" ? `${v.peer.ms} мс` : "да") : "нет";
+    if (v.prod?.code === "200") {
+      if (typeof v.prod.ms === "number") out.prod = typeof out.prod === "number" ? Math.min(out.prod, v.prod.ms) : v.prod.ms;
+      else if (out.prod === null) out.prod = "да";
+    } else if (v.prod && v.prod.state !== "unknown") {
+      prodSeen = /^\d+$/.test(v.prod.code) && v.prod.code !== "000" ? `код ${v.prod.code}` : "нет";
+    }
+    if (!v.peer?.addr) continue;
+    if (v.peer.state === "up") out.peers[v.peer.addr] = typeof v.peer.ms === "number" ? `${v.peer.ms} мс` : "да";
+    else if (v.peer.state === "down") out.peers[v.peer.addr] ??= /^\d+$/.test(v.peer.code) && v.peer.code !== "000" ? `код ${v.peer.code}` : "нет";
+    else if (v.peer.state === "unreachable" && v.prod?.state !== "unknown") out.peers[v.peer.addr] ??= "нет";
   }
+  if (out.prod === null && prodSeen) out.prod = prodSeen;
   return out;
 }
 
-function ruCell(r, ru) {
+/** Строки сервера — по виду пробы (готовность и живость в группе с готовностью), а не по id. */
+function isServerRow(r, view) {
+  if (r.kind === "ready") return true;
+  if (r.kind !== "http") return false;
+  return view.groups.some((g) => g.rows.includes(r) && g.rows.some((x) => x.kind === "ready"));
+}
+
+function ruCell(r, ru, view) {
+  // Удержанная строка (первый сбой, отрезанность) показывает прежнее — свежий русский замер выдал бы
+  // то, что удержание прячет (ревью 26.10.2026).
+  if (r.suspect || r.cutoff || r.heldNote) return "—";
   if (r.kind === "balancer") return (r.ip && ru.peers[r.ip]) || "—";
-  if (r.kind === "ready" || (r.kind === "http" && r.id === "api")) return ru.prod === null ? "—" : `${ru.prod} мс`;
+  if (isServerRow(r, view)) return ru.prod === null ? "—" : typeof ru.prod === "number" ? `${ru.prod} мс` : ru.prod;
   return "—";
 }
 
