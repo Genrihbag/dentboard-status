@@ -25,8 +25,8 @@ const when = (iso) =>
   new Date(iso).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", dateStyle: "short", timeStyle: "short" });
 
 /**
- * ГРУППЫ (25.10.2026) — «Для пользователей», «Балансировщики», «DNS», «Сервер и база»,
- * «Сертификат». Порядок и тексты — из `history.json`, а он из `targets.json`: страница их не
+ * ГРУППЫ (25.10.2026) — «Для пользователей», «Балансировщики», «DNS», «Сервер и база» (и
+ * «Сертификат» в истории — на странице не рисуется, см. `onPage` ниже). Порядок и тексты — из `history.json`, а он из `targets.json`: страница их не
  * придумывает, иначе подпись на странице и строка в канале разошлись бы молча.
  *
  * ⚠️ ПРЕЖНИЙ ФАЙЛ (без `groups`) НЕ РОНЯЕТ СБОРКУ. Если круг упал до записи истории, на диске
@@ -56,7 +56,17 @@ const overall = ["up", "slow", "down"].includes(h.overall) ? h.overall : "unknow
  * 14 дней — людям всё работает. Заголовок остаётся «Все сервисы работают», под ним — одна фраза.
  * «Мы знаем о проблеме и уже занимаемся» здесь читалось бы клиентом как авария, которой нет.
  */
-const notice = typeof h.notice === "string" && h.notice ? h.notice : null;
+const notice = noticeOf(h);
+/**
+ * Оговорка берётся, только если историю записал код, знающий про `onPage` (у каждой группы есть
+ * это поле). Прежний код писал оговорку и про сертификат («Сертификат скоро истекает…»), которого
+ * на странице больше нет; такой файл живёт до первого успешного круга после выката (ревью
+ * 25.10.2026). Скрипт живого обновления получает эту же функцию исходником.
+ */
+function noticeOf(h) {
+  const fresh = Array.isArray(h.groups) && h.groups.length > 0 && h.groups.every((g) => g && "onPage" in g);
+  return fresh && typeof h.notice === "string" && h.notice ? h.notice : null;
+}
 /** Подпись под заголовком. Скрипт живого обновления получает ЭТУ ЖЕ функцию её исходником. */
 function subtitle(state, note, stamp) {
   if (state === "slow" || state === "down") return `Мы знаем о проблеме и уже занимаемся ею. Проверено ${stamp}`;
@@ -75,8 +85,22 @@ function subtitle(state, note, stamp) {
  * Её события в «Последних событиях» тоже не показываются — иначе строка, которой на странице нет,
  * появлялась бы в истории.
  */
-const shown = groups.filter((g) => g.onPage !== false);
-const offPage = new Set(groups.filter((g) => g.onPage === false).map((g) => g.title));
+/**
+ * ⚠️ ЧТО НЕ РИСОВАТЬ — ПО `targets.json` (единственный источник), а не только по истории: файл,
+ * записанный прежним кодом, поля `onPage` не несёт, и до первого успешного круга после выката
+ * карточка «Сертификат» вернулась бы на страницу (ревью 25.10.2026). Нет списка целей — берём то,
+ * что сказано в истории.
+ */
+let configOff = [];
+try {
+  const config = JSON.parse(readFileSync(process.env.STATUS_TARGETS ?? "targets.json", "utf8"));
+  configOff = config.groups.filter((g) => g.onPage === false).map((g) => g.id);
+} catch {
+  configOff = [];
+}
+const hiddenGroup = (g) => g.onPage === false || configOff.includes(g.id);
+const shown = groups.filter((g) => !hiddenGroup(g));
+const offPage = new Set(groups.filter(hiddenGroup).map((g) => g.title));
 const allRows = shown.flatMap((g) => g.rows);
 
 /** Заголовок и подпись по своду — те же слова, что у точки в шапке кабинетов (ztl-lab `HEADLINE`). */
@@ -106,7 +130,7 @@ const cards = shown
   .map((g) => {
     const multi = g.rows.length > 1;
     const showState = multi && g.state !== "up";
-    // Группа из одной строки с тем же именем («Сервер и база», «Сертификат») — без шапки: заголовок
+    // Группа из одной строки с тем же именем («Сервер и база») — без шапки: заголовок
     // над единственной строкой того же имени — тот самый дубль, на который жаловался владелец.
     const headless = g.rows.length === 1 && g.rows[0].name === g.title;
     const head = headless
@@ -176,7 +200,7 @@ writeFileSync(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- ⚠️ ПЕРЕЗАГРУЗКА — ЗАПАСНОЙ ПУТЬ, А НЕ ОСНОВНОЙ. Числа обновляет скрипт внизу, каждые 30 с и
+<!-- ⚠️ ПЕРЕЗАГРУЗКА — ЗАПАСНОЙ ПУТЬ, А НЕ ОСНОВНОЙ. Состояния обновляет скрипт внизу, каждые 30 с и
      БЕЗ перезагрузки: страницу открывают в минуту аварии, и мигание всей вёрстки в этот момент
      читается как «оно ещё и падает». Пять минут здесь — на случай выключенного JS: реже, чем
      раньше, потому что теперь это страховка, а не механизм. -->
@@ -374,7 +398,7 @@ ${historyBlock}
 </div>
 <script>
 /**
- * ЖИВОЕ ОБНОВЛЕНИЕ ЧИСЕЛ — без перезагрузки страницы.
+ * ЖИВОЕ ОБНОВЛЕНИЕ СОСТОЯНИЙ — без перезагрузки страницы.
  *
  * 🔴 ЗАЧЕМ. Наблюдатель пишет результат КАЖДУЮ МИНУТУ, а страница обновлялась перезагрузкой раз в
  * две — то есть человек видел числа старше данных вдвое и справедливо считал, что «пинги не
@@ -428,8 +452,7 @@ ${historyBlock}
         var state = li.querySelector(".row-state");
         var word = li.querySelector(".row-word");
         if (state) state.className = "row-state " + (CLS[r.state] || "is-unknown");
-        // Число — то, что положил круг (поле value): у не ответившей строки его нет, потому что там
-        // оно означало бы длительность ожидания до отказа — другую величину под тем же видом.
+        // Только слово и цвет: чисел у строк на странице нет (решение владельца 25.10.2026).
         if (word) word.textContent = r.word || "";
       }
     }
@@ -441,8 +464,9 @@ ${historyBlock}
     document.title = HEADLINE[overall] + " — DentBoard";
     var p = document.querySelector("[data-checked]");
     var stamp = when(h.updatedAt);
-    if (p && stamp) p.textContent = subtitle(overall, typeof h.notice === "string" ? h.notice : null, stamp);
+    if (p && stamp) p.textContent = subtitle(overall, noticeOf(h), stamp);
   }
+  ${noticeOf.toString()}
   // Та же функция, что собирала страницу на сервере, — вставлена её исходником, не копией.
   ${subtitle.toString()}
   function tick() {
@@ -461,5 +485,5 @@ ${historyBlock}
 );
 
 console.log(
-  `страница собрана: групп ${groups.length}, строк ${allRows.length}, не в порядке ${allRows.filter((r) => r.state !== "up").length}, свод «${overall}», событий в истории ${events.length}`,
+  `страница собрана: групп ${shown.length} (скрыто ${groups.length - shown.length}), строк ${allRows.length}, не в порядке ${allRows.filter((r) => r.state !== "up").length}, свод «${overall}», событий в истории ${events.length}`,
 );

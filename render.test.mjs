@@ -76,12 +76,24 @@ function render(history) {
   try {
     mkdirSync(join(dir, "data"));
     writeFileSync(join(dir, "data", "history.json"), JSON.stringify(history));
-    execFileSync(process.execPath, [RENDER], { cwd: dir, stdio: "pipe" });
+    // Боевой список целей — как на машине наблюдателя, где `render.mjs` идёт в каталоге репозитория.
+    execFileSync(process.execPath, [RENDER], { cwd: dir, stdio: "pipe", env: { ...process.env, STATUS_TARGETS: TARGETS } });
     return readFileSync(join(dir, "index.html"), "utf8");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+const TARGETS = fileURLToPath(new URL("./targets.json", import.meta.url));
+
+/**
+ * История, записанная ПРЕЖНИМ кодом (до `onPage`): группа сертификата без признака и оговорка про
+ * сертификат. Такой файл лежит на машине до первого успешного круга после выката (ревью 25.10.2026).
+ */
+const OLD = {
+  ...HISTORY,
+  notice: "Сертификат скоро истекает, продлеваем — на работу это не влияет.",
+  groups: HISTORY.groups.map(({ onPage, ...g }) => g),
+};
 
 /** Видимая разметка без скрипта и стилей — числа в коде скрипта страницей не являются. */
 const visible = (html) => html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style[\s\S]*?<\/style>/g, "");
@@ -113,4 +125,12 @@ test("а слова, группы, фраза под группой и собы�
   assert.match(page, /вход работает через второй/);
   assert.match(page, /<b>Балансировщик 2<\/b> не отвечает/);
   assert.match(page, /Резерв частично недоступен/);
+});
+
+test("история ПРЕЖНЕГО кода (без onPage): сертификата на странице всё равно нет — ни карточки, ни события, ни оговорки", () => {
+  assert.ok(OLD.groups.every((g) => !("onPage" in g)), "положительный контроль: признака во входе нет");
+  const page = visible(render(OLD));
+  assert.doesNotMatch(page, /ертификат/);
+  assert.doesNotMatch(page, /\d\s*мс/);
+  assert.match(page, /Балансировщик 2/);
 });
