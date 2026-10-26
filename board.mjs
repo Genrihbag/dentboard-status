@@ -57,23 +57,30 @@ export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 5)
 export function boardText(view, stamp, statusPage, mesh = null) {
   /**
    * ТАБЛИЦЕЙ (решение владельца 26.10.2026: «простыня с провайдерами» не читалась). Строки — цели,
-   * колонки — значок, имя, время ответа из Европы (NL) и из России (голоса балансировщиков:
-   * прод — для «API» и «Базы данных и кэша», соседняя дверь — для балансировщика). Где из России
-   * замера нет — «—». Ровные колонки — в <pre>: Telegram рисует его моноширинным.
+   * колонки — значок, имя, время ответа из Европы (🇳🇱) и из России (🇷🇺, голоса балансировщиков:
+   * прод — для «API» и «Базы данных и кэша», соседняя дверь — для балансировщика, СРЕДНЕЕ по обоим —
+   * для трёх страниц пользователей — pages.* в голосе, 26.10.2026: там не «меньший из ответивших»,
+   * как у API, а именно среднее — страница одна и та же на обоих балансировщиках, и минимум у двух
+   * одинаковых путей обманул бы разницу между ними; один голос — его значение, ни одного — «—»).
+   * Где из России замера нет — «—». Ровные колонки — в <pre>: Telegram рисует его моноширинным.
+   *
+   * ⚠️ ШАПКА — ФЛАГИ, А НЕ БУКВЫ (решение владельца 26.10.2026). Флаг ШИРЕ буквы в моноширинном
+   * выводе (два знакоместа против одного), поэтому ширина столбца и отступы считаются `cellWidth`
+   * (по графемам), а не `.length` — см. комментарий у неё.
    *
    * ⚠️ ПРОВАЙДЕРОВ И АДРЕСОВ ЗДЕСЬ НЕТ — они в событийных сообщениях «Сбой / Внимание». Причины
    * отказов — тоже там; здесь слово («нет», «код 502») и фраза группы под таблицей.
-   * ⚠️ Раздел «Кто кого видит» снят — его заменяет колонка RU.
+   * ⚠️ Раздел «Кто кого видит» снят — его заменяет колонка 🇷🇺.
    */
   const rows = view.groups.flatMap((g) => g.rows);
   const ru = ruTable(mesh);
   const cells = rows.map((r) => [icon(r), r.name, nlCell(r), ruCell(r, ru, view)]);
-  const nameW = Math.max(4, ...cells.map((c) => c[1].length));
-  const nlW = Math.max(2, ...cells.map((c) => c[2].length));
-  const ruW = Math.max(2, ...cells.map((c) => c[3].length));
+  const nameW = Math.max(4, ...cells.map((c) => cellWidth(c[1])));
+  const nlW = Math.max(2, ...cells.map((c) => cellWidth(c[2])));
+  const ruW = Math.max(2, ...cells.map((c) => cellWidth(c[3])));
   // Значок — эмодзи, его ширина в моноширинном шрифте одинакова у всех строк; в шапке — два пробела.
-  const line = (ic, name, nl, ruv) => `${ic} ${name.padEnd(nameW)}  ${nl.padStart(nlW)}  ${ruv.padStart(ruW)}`;
-  const table = [line("  ", "Цель", "NL", "RU"), ...cells.map((c) => line(...c))].join("\n");
+  const line = (ic, name, nl, ruv) => `${ic} ${padEndW(name, nameW)}  ${padStartW(nl, nlW)}  ${padStartW(ruv, ruW)}`;
+  const table = [line("  ", "Цель", "🇳🇱", "🇷🇺"), ...cells.map((c) => line(...c))].join("\n");
 
   // Под таблицей — то, что требует слов: фразы групп («вход работает через второй») и пометки точек.
   const notes = view.groups.filter((g) => g.summary).map((g) => `<i>${esc(g.summary)}</i>`);
@@ -105,6 +112,29 @@ export function boardText(view, stamp, statusPage, mesh = null) {
 /** Предел длины сообщения Telegram (после разбора разметки; считаем с запасом — по исходнику). */
 export const TELEGRAM_LIMIT = 4096;
 
+/**
+ * ШИРИНА ЯЧЕЙКИ В МОНОШИРИННОМ `<pre>` — ПО ГРАФЕМАМ, А НЕ ПО `.length` И НЕ ПО КОДОВЫМ ТОЧКАМ
+ * (решение владельца 26.10.2026: шапка «NL»/«RU» → флаги 🇳🇱/🇷🇺).
+ *
+ * 🔴 ФЛАГ — ОДНА графема из ДВУХ кодовых точек региональных индикаторов. `.length` (UTF-16) у него
+ * РАВЕН 4 — суррогатная пара на каждую точку. Посчитай ширину по `.length`, и `padStart` решит, что
+ * флаг уже «длиннее» нужной ширины, и недодаст пробелов ИМЕННО тогда, когда столбец шире двух
+ * знакомест (любая цифра времени ответа длиннее «NL») — колонки разъедутся не в образце с коротким
+ * «—», а в боевом табло. `Array.from`/спред (код-ТОЧКИ) дал бы 2 — случайно верно для одного флага,
+ * но это совпадение для ОДНОЙ графемы, а не правило: графемой может быть и более длинная
+ * последовательность. Эмодзи и флаг в моноширинном выводе занимают ДВА знакоместа, как иероглиф;
+ * остальное (буквы, цифры, «—») — одно.
+ */
+function cellWidth(s) {
+  const WIDE = /\p{Regional_Indicator}|\p{Extended_Pictographic}/u;
+  return [...new Intl.Segmenter("ru", { granularity: "grapheme" }).segment(s)].reduce(
+    (w, { segment }) => w + (WIDE.test(segment) ? 2 : 1),
+    0,
+  );
+}
+const padStartW = (s, width) => (width > cellWidth(s) ? " ".repeat(width - cellWidth(s)) + s : s);
+const padEndW = (s, width) => (width > cellWidth(s) ? s + " ".repeat(width - cellWidth(s)) : s);
+
 /** NL — время ответа строки или слово: «нет» (не ответила), «код 502», DNS — «4/4», сертификат — «89 дн». */
 function nlCell(r) {
   if (r.state === "unknown") return "—";
@@ -123,14 +153,28 @@ function nlCell(r) {
   return typeof r.ms === "number" ? `${r.ms} мс` : "нет";
 }
 
+/** Три страницы пользователей (26.10.2026, ztl-lab observer.sh `pages`): лаборатория, портал, сайт. */
+const PAGE_KEYS = ["lab", "portal", "site"];
+
 /**
  * Замеры из России по свежим голосам: прод (меньший из ответивших 200; ни один не 200 — «нет» или
- * код) и каждая дверь глазами соседа. Голос двери с лежащей своей сетью (прод `unknown`) про соседа
- * не говорит — его «сосед не отвечает» про её сеть (то же правило, что в mesh.mjs ruEvidence).
+ * код), каждая дверь глазами соседа и три страницы пользователей (`pages.*` в голосе).
+ *
+ * ⚠️ У СТРАНИЦ — СРЕДНЕЕ, НЕ МЕНЬШЕЕ (в отличие от `prod` выше). `prod` — одна и та же проверка
+ * готовности с двух точек, и «меньший из ответивших» там оправдан: нас интересует «жив ли прод хоть
+ * с одной стороны». Страница из `pages.*` — тоже ОДНА И ТА ЖЕ у обоих балансировщиков, но вопрос
+ * другой: «что видит человек», а минимум по двум одинаковым путям обманул бы разницу между ними
+ * (решение владельца 26.10.2026). Один голос с числом — он и есть среднее (среднее одного числа —
+ * оно само), голосов с числом нет вовсе — «—».
+ *
+ * Голос двери с лежащей своей сетью (прод `unknown`) про соседа и про страницы не говорит — его
+ * «не отвечает» про её сеть, а не про цель (то же правило, что в mesh.mjs ruEvidence).
  */
 export function ruTable(mesh) {
-  const out = { prod: null, peers: {} };
+  const out = { prod: null, peers: {}, pages: { lab: null, portal: null, site: null } };
   let prodSeen = null;
+  const pageMs = { lab: [], portal: [], site: [] };
+  const pageFallback = { lab: null, portal: null, site: null };
   for (const v of mesh?.votes ?? []) {
     if (!v.fresh) continue;
     if (v.prod?.code === "200") {
@@ -139,14 +183,27 @@ export function ruTable(mesh) {
     } else if (v.prod && v.prod.state !== "unknown") {
       prodSeen = /^\d+$/.test(v.prod.code) && v.prod.code !== "000" ? `код ${v.prod.code}` : "нет";
     }
+    for (const p of PAGE_KEYS) {
+      const page = v.pages?.[p];
+      if (!page) continue;
+      if (page.code === "200" && typeof page.ms === "number") pageMs[p].push(page.ms);
+      else if (page.code === "200") pageFallback[p] ??= "да";
+      else if (v.prod?.state !== "unknown") pageFallback[p] ??= /^\d+$/.test(page.code) && page.code !== "000" ? `код ${page.code}` : "нет";
+    }
     if (!v.peer?.addr) continue;
     if (v.peer.state === "up") out.peers[v.peer.addr] = typeof v.peer.ms === "number" ? `${v.peer.ms} мс` : "да";
     else if (v.peer.state === "down") out.peers[v.peer.addr] ??= /^\d+$/.test(v.peer.code) && v.peer.code !== "000" ? `код ${v.peer.code}` : "нет";
     else if (v.peer.state === "unreachable" && v.prod?.state !== "unknown") out.peers[v.peer.addr] ??= "нет";
   }
   if (out.prod === null && prodSeen) out.prod = prodSeen;
+  for (const p of PAGE_KEYS) {
+    out.pages[p] = pageMs[p].length ? Math.round(pageMs[p].reduce((a, b) => a + b, 0) / pageMs[p].length) : pageFallback[p];
+  }
   return out;
 }
+
+/** Строка цели → ключ в `ru.pages` (id из targets.json, группа «Для пользователей»). */
+const PAGE_ROW_TO_KEY = { app: "lab", portal: "portal", site: "site" };
 
 /** Строки сервера — по виду пробы (готовность и живость в группе с готовностью), а не по id. */
 function isServerRow(r, view) {
@@ -160,6 +217,10 @@ function ruCell(r, ru, view) {
   // то, что удержание прячет (ревью 26.10.2026).
   if (r.suspect || r.cutoff || r.heldNote) return "—";
   if (r.kind === "balancer") return (r.ip && ru.peers[r.ip]) || "—";
+  if (PAGE_ROW_TO_KEY[r.id]) {
+    const v = ru.pages[PAGE_ROW_TO_KEY[r.id]];
+    return v === null ? "—" : typeof v === "number" ? `${v} мс` : v;
+  }
   if (isServerRow(r, view)) return ru.prod === null ? "—" : typeof ru.prod === "number" ? `${ru.prod} мс` : ru.prod;
   return "—";
 }
