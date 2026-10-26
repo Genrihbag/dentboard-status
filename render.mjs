@@ -216,11 +216,19 @@ const cards = shown
 const phrase = (e) => (e.phrase ? e.phrase : e.state === "упал" ? "перестал отвечать" : "снова отвечает");
 const events = (Array.isArray(h.events) ? h.events : []).filter((e) => !offPage.has(e.group));
 /**
- * Событие называет КОНКРЕТНУЮ строку — «Балансировщик 1 не отвечает», и в свёрнутых группах тоже:
- * «Балансировщики — один не отвечает» не говорил, какой (владелец 26.10.2026: «какой один?»). Номер
- * без провайдера и адреса — провайдер только в канале.
+ * Свёрнутые группы («Балансировщики», «DNS») — ОБЩИМИ фразами, без номера и провайдера (владелец
+ * 26.10.2026: «пиши условно — работа балансировщика восстановлена»). Какой именно — в канале.
  */
+const collapsedTitles = new Set(groups.filter((g) => configCollapse.includes(g.id)).map((g) => g.title));
+const GENERIC = {
+  Балансировщики: ["Балансировщик недоступен", "Работа балансировщика восстановлена"],
+  DNS: ["DNS недоступен", "Работа DNS восстановлена"],
+};
 function eventText(e) {
+  if (collapsedTitles.has(e.group) && GENERIC[e.group]) {
+    const up = e.state === "поднялся" || /снова|восстанов/.test(phrase(e));
+    return `<b>${esc(GENERIC[e.group][up ? 1 : 0])}</b>`;
+  }
   return `<b>${esc(e.target)}</b> ${esc(phrase(e))}`;
 }
 const historyBlock =
