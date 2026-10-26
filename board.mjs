@@ -58,11 +58,12 @@ export function boardText(view, stamp, statusPage, mesh = null) {
   /**
    * ТАБЛИЦЕЙ (решение владельца 26.10.2026: «простыня с провайдерами» не читалась). Строки — цели,
    * колонки — значок, имя, время ответа из Европы (🇳🇱) и из России (🇷🇺, голоса балансировщиков:
-   * прод — для «API» и «Базы данных и кэша», соседняя дверь — для балансировщика, СРЕДНЕЕ по обоим —
-   * для трёх страниц пользователей — pages.* в голосе, 26.10.2026: там не «меньший из ответивших»,
-   * как у API, а именно среднее — страница одна и та же на обоих балансировщиках, и минимум у двух
-   * одинаковых путей обманул бы разницу между ними; один голос — его значение, ни одного — «—»).
-   * Где из России замера нет — «—». Ровные колонки — в <pre>: Telegram рисует его моноширинным.
+   * прод — для «API» и «Базы данных и кэша», соседняя дверь — для балансировщика, pages.* в голосе —
+   * для трёх страниц пользователей). Во ВСЕЙ колонке 🇷🇺 — СРЕДНЕЕ по двум балансировщикам (решение
+   * владельца 26.10.2026, расширено с трёх строк страниц на всю колонку: было «меньший из
+   * ответивших» — минимум у ОДНОЙ И ТОЙ ЖЕ цели с двух точек обманывает разницу между ними); один
+   * голос — его значение, ни одного — «—». Где из России замера нет вовсе — «—». Ровные колонки —
+   * в <pre>: Telegram рисует его моноширинным.
    *
    * ⚠️ ШАПКА — ФЛАГИ, А НЕ БУКВЫ (решение владельца 26.10.2026). Флаг ШИРЕ буквы в моноширинном
    * выводе (два знакоместа против одного), поэтому ширина столбца и отступы считаются `cellWidth`
@@ -156,32 +157,38 @@ function nlCell(r) {
 /** Три страницы пользователей (26.10.2026, ztl-lab observer.sh `pages`): лаборатория, портал, сайт. */
 const PAGE_KEYS = ["lab", "portal", "site"];
 
+/** Целое среднее по накопленным мс (не меньшее!) — см. комментарий у `ruTable`. */
+const avgMs = (arr) => Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+
 /**
- * Замеры из России по свежим голосам: прод (меньший из ответивших 200; ни один не 200 — «нет» или
- * код), каждая дверь глазами соседа и три страницы пользователей (`pages.*` в голосе).
+ * Замеры из России по свежим голосам: прод, каждая дверь глазами соседа (балансировщики) и три
+ * страницы пользователей (`pages.*` в голосе) — у ВСЕЙ колонки 🇷🇺 ОДНО правило (решение владельца
+ * 26.10.2026, расширено с трёх строк страниц на всю колонку):
  *
- * ⚠️ У СТРАНИЦ — СРЕДНЕЕ, НЕ МЕНЬШЕЕ (в отличие от `prod` выше). `prod` — одна и та же проверка
- * готовности с двух точек, и «меньший из ответивших» там оправдан: нас интересует «жив ли прод хоть
- * с одной стороны». Страница из `pages.*` — тоже ОДНА И ТА ЖЕ у обоих балансировщиков, но вопрос
- * другой: «что видит человек», а минимум по двум одинаковым путям обманул бы разницу между ними
- * (решение владельца 26.10.2026). Один голос с числом — он и есть среднее (среднее одного числа —
- * оно само), голосов с числом нет вовсе — «—».
+ * ⚠️ СРЕДНЕЕ ПО ДВУМ ГОЛОСАМ, НЕ МЕНЬШЕЕ. Прод/страница/соседняя дверь — ОДНА И ТА ЖЕ цель с двух
+ * точек, и «меньший из ответивших» ЗАНИЖАЕТ то, что видит человек: минимум по двум одинаковым путям
+ * обманывает разницу между ними (раньше здесь было «меньший» для прода — это и была ошибка, которую
+ * правили). Один голос с числом — он и есть среднее (среднее одного числа — оно само); голосов с
+ * числом нет вовсе — «—»; ни один код не 200 — слово («нет»/«код N»), как и раньше.
  *
  * Голос двери с лежащей своей сетью (прод `unknown`) про соседа и про страницы не говорит — его
  * «не отвечает» про её сеть, а не про цель (то же правило, что в mesh.mjs ruEvidence).
  */
 export function ruTable(mesh) {
   const out = { prod: null, peers: {}, pages: { lab: null, portal: null, site: null } };
-  let prodSeen = null;
+  const prodMs = [];
+  let prodFallback = null;
+  const peerMs = {};
+  const peerFallback = {};
   const pageMs = { lab: [], portal: [], site: [] };
   const pageFallback = { lab: null, portal: null, site: null };
   for (const v of mesh?.votes ?? []) {
     if (!v.fresh) continue;
     if (v.prod?.code === "200") {
-      if (typeof v.prod.ms === "number") out.prod = typeof out.prod === "number" ? Math.min(out.prod, v.prod.ms) : v.prod.ms;
-      else if (out.prod === null) out.prod = "да";
+      if (typeof v.prod.ms === "number") prodMs.push(v.prod.ms);
+      else prodFallback ??= "да";
     } else if (v.prod && v.prod.state !== "unknown") {
-      prodSeen = /^\d+$/.test(v.prod.code) && v.prod.code !== "000" ? `код ${v.prod.code}` : "нет";
+      prodFallback ??= /^\d+$/.test(v.prod.code) && v.prod.code !== "000" ? `код ${v.prod.code}` : "нет";
     }
     for (const p of PAGE_KEYS) {
       const page = v.pages?.[p];
@@ -191,14 +198,20 @@ export function ruTable(mesh) {
       else if (v.prod?.state !== "unknown") pageFallback[p] ??= /^\d+$/.test(page.code) && page.code !== "000" ? `код ${page.code}` : "нет";
     }
     if (!v.peer?.addr) continue;
-    if (v.peer.state === "up") out.peers[v.peer.addr] = typeof v.peer.ms === "number" ? `${v.peer.ms} мс` : "да";
-    else if (v.peer.state === "down") out.peers[v.peer.addr] ??= /^\d+$/.test(v.peer.code) && v.peer.code !== "000" ? `код ${v.peer.code}` : "нет";
-    else if (v.peer.state === "unreachable" && v.prod?.state !== "unknown") out.peers[v.peer.addr] ??= "нет";
+    const addr = v.peer.addr;
+    peerMs[addr] ??= [];
+    if (v.peer.state === "up") {
+      if (typeof v.peer.ms === "number") peerMs[addr].push(v.peer.ms);
+      else peerFallback[addr] ??= "да";
+    } else if (v.peer.state === "down") {
+      peerFallback[addr] ??= /^\d+$/.test(v.peer.code) && v.peer.code !== "000" ? `код ${v.peer.code}` : "нет";
+    } else if (v.peer.state === "unreachable" && v.prod?.state !== "unknown") {
+      peerFallback[addr] ??= "нет";
+    }
   }
-  if (out.prod === null && prodSeen) out.prod = prodSeen;
-  for (const p of PAGE_KEYS) {
-    out.pages[p] = pageMs[p].length ? Math.round(pageMs[p].reduce((a, b) => a + b, 0) / pageMs[p].length) : pageFallback[p];
-  }
+  out.prod = prodMs.length ? avgMs(prodMs) : prodFallback;
+  for (const addr of Object.keys(peerMs)) out.peers[addr] = peerMs[addr].length ? avgMs(peerMs[addr]) : (peerFallback[addr] ?? null);
+  for (const p of PAGE_KEYS) out.pages[p] = pageMs[p].length ? avgMs(pageMs[p]) : pageFallback[p];
   return out;
 }
 
@@ -212,16 +225,16 @@ function isServerRow(r, view) {
   return view.groups.some((g) => g.rows.includes(r) && g.rows.some((x) => x.kind === "ready"));
 }
 
+/** `null` → «—»; число (мс-среднее) → «N мс»; слово-фолбэк («нет»/«код N»/«да») — как есть. */
+const fmtRu = (v) => (v === null || v === undefined ? "—" : typeof v === "number" ? `${v} мс` : v);
+
 function ruCell(r, ru, view) {
   // Удержанная строка (первый сбой, отрезанность) показывает прежнее — свежий русский замер выдал бы
   // то, что удержание прячет (ревью 26.10.2026).
   if (r.suspect || r.cutoff || r.heldNote) return "—";
-  if (r.kind === "balancer") return (r.ip && ru.peers[r.ip]) || "—";
-  if (PAGE_ROW_TO_KEY[r.id]) {
-    const v = ru.pages[PAGE_ROW_TO_KEY[r.id]];
-    return v === null ? "—" : typeof v === "number" ? `${v} мс` : v;
-  }
-  if (isServerRow(r, view)) return ru.prod === null ? "—" : typeof ru.prod === "number" ? `${ru.prod} мс` : ru.prod;
+  if (r.kind === "balancer") return r.ip ? fmtRu(ru.peers[r.ip]) : "—";
+  if (PAGE_ROW_TO_KEY[r.id]) return fmtRu(ru.pages[PAGE_ROW_TO_KEY[r.id]]);
+  if (isServerRow(r, view)) return fmtRu(ru.prod);
   return "—";
 }
 

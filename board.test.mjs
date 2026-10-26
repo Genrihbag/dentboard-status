@@ -223,6 +223,36 @@ test("прод из России лежит у обеих дверей — RU «
   assert.match(lineOf(t, "API"), /(нет|код 503)$/);
 });
 
+/* ── RU всей колонки — СРЕДНЕЕ, не меньшее (26.10.2026: правило расширено со страниц на всю 🇷🇺) ── */
+
+const SERVER_CFG = { groups: [{ id: "server", title: "Сервер", kind: "ready", rows: [{ id: "api", name: "API", kind: "http" }, { id: "server", name: "База данных и кэш" }] }] };
+const serverText = (mesh) => boardText(evaluate(SERVER_CFG, { api: up(), server: { ok: true, status: 200, ms: 1 } }), STAMP, PAGE, mesh);
+
+test("RU у API/БД — СРЕДНЕЕ по двум балансировщикам, а не меньшее", () => {
+  const mesh = { votes: [{ fresh: true, prod: { code: "200", ms: 40 } }, { fresh: true, prod: { code: "200", ms: 60 } }], notes: {} };
+  const t = serverText(mesh);
+  assert.match(lineOf(t, "API"), /50 мс$/, "(40+60)/2=50, не меньшее 40");
+  assert.match(lineOf(t, "База данных и кэш"), /50 мс$/);
+});
+
+test("RU у API/БД — один голос с числом: он и есть «среднее» (парный случай к двум голосам)", () => {
+  const mesh = { votes: [{ fresh: true, prod: { code: "200", ms: 77 } }], notes: {} };
+  assert.match(lineOf(serverText(mesh), "API"), /77 мс$/);
+});
+
+test("RU у балансировщика — СРЕДНЕЕ, если о нём есть два голоса, а не меньшее", () => {
+  // В бою о каждом балансировщике обычно голосует только СОСЕД, но правило общее для всей колонки —
+  // и код должен усреднять, а не брать последний/меньший, если голосов о нём окажется два.
+  const mesh = {
+    votes: [
+      { fresh: true, prod: { code: "200", ms: 1 }, peer: { addr: "136.234.13.100", state: "up", ms: 20 } },
+      { fresh: true, prod: { code: "200", ms: 1 }, peer: { addr: "136.234.13.100", state: "up", ms: 40 } },
+    ],
+    notes: {},
+  };
+  assert.match(lineOf(text({ app: up(), lb1: up(), lb2: up() }, mesh), "Балансировщик 1"), /30 мс$/, "(20+40)/2=30");
+});
+
 test("непроверенный DNS — «—», а не «нет» (не выглядит отказом)", () => {
   const cfg = { groups: [{ id: "dns", title: "DNS", kind: "dns", rows: [{ id: "d1", name: "DNS 1" }] }] };
   assert.match(lineOf(boardText(evaluate(cfg, {}), STAMP, PAGE), "DNS 1"), /^⚪ DNS 1\s+—\s+—$/);
@@ -246,7 +276,7 @@ const PAGE_CFG = {
 };
 const pageText = (mesh) => boardText(evaluate(PAGE_CFG, { app: up(), portal: up(), site: up() }), STAMP, PAGE, mesh);
 
-test("RU страниц — СРЕДНЕЕ по двум балансировщикам, а не меньшее (в отличие от прода)", () => {
+test("RU страниц — СРЕДНЕЕ по двум балансировщикам, а не меньшее (то же правило, что у API/БД)", () => {
   const mesh = {
     votes: [
       { fresh: true, pages: { lab: { code: "200", ms: 40 }, portal: { code: "200", ms: 70 }, site: { code: "200", ms: 20 } } },
