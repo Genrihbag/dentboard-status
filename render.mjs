@@ -216,13 +216,11 @@ const cards = shown
 const phrase = (e) => (e.phrase ? e.phrase : e.state === "упал" ? "перестал отвечать" : "снова отвечает");
 const events = (Array.isArray(h.events) ? h.events : []).filter((e) => !offPage.has(e.group));
 /**
- * Событие свёрнутой группы («Балансировщики», «DNS») — от имени ГРУППЫ: отдельных «Балансировщик 2»
- * на странице нет (решение владельца 26.10.2026), и в истории их тоже не показываем. Запись в
- * history.json не меняется — меняется только то, как её рисует страница.
+ * Событие называет КОНКРЕТНУЮ строку — «Балансировщик 1 не отвечает», и в свёрнутых группах тоже:
+ * «Балансировщики — один не отвечает» не говорил, какой (владелец 26.10.2026: «какой один?»). Номер
+ * без провайдера и адреса — провайдер только в канале.
  */
-const collapsedTitles = new Set(groups.filter((g) => configCollapse.includes(g.id)).map((g) => g.title));
 function eventText(e) {
-  if (collapsedTitles.has(e.group)) return `<b>${esc(e.group)}</b> — один ${esc(phrase(e))}`;
   return `<b>${esc(e.target)}</b> ${esc(phrase(e))}`;
 }
 const historyBlock =
