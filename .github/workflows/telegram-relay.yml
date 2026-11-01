@@ -56,6 +56,9 @@ jobs:
           # Один вызов Bot API: ответ в resp.json, «ok» — признак успеха (код HTTP у отказа бывает и 200).
           tg() {
             local method=$1; shift
+            # curl создаёт файл только на первом байте ответа: без сноса оборванный вызов прочёл бы
+            # ответ ПРЕДЫДУЩЕГО и отчитался его «ok» (ревью 01.11.2026).
+            rm -f resp.json
             curl -sS --retry 3 --retry-all-errors -o resp.json -X POST "https://api.telegram.org/bot${TOKEN}/${method}" "$@" || true
             [ "$(jq -r .ok resp.json 2> /dev/null)" = "true" ]
           }
@@ -98,7 +101,14 @@ jobs:
           fi
           send --data-urlencode "disable_notification=true" || { echo "табло не отправлено: $(why)" >&2; exit 1; }
           id=$(jq -r .result.message_id resp.json)
-          # Закрепление — отдельное право бота: его нет — табло всё равно в канале, но это надо ВИДЕТЬ.
-          tg pinChatMessage --data-urlencode "chat_id=${CHAT}" --data-urlencode "message_id=${id}" \
-            --data-urlencode "disable_notification=true" || { echo "табло №${id} отправлено, НО не закреплено: $(why)" >&2; exit 1; }
+          # ⚠️ НЕ ЗАКРЕПИЛОСЬ — СНЯТЬ ОТПРАВЛЕННОЕ. Номер табла берётся только из закреплённого, поэтому
+          # незакреплённое следующий запуск не найдёт и пошлёт ещё одно — по посту в канал каждые пять
+          # минут. Пусть лучше задание краснеет каждые пять минут, а канал остаётся чистым (ревью 01.11.2026).
+          if ! tg pinChatMessage --data-urlencode "chat_id=${CHAT}" --data-urlencode "message_id=${id}" \
+            --data-urlencode "disable_notification=true"; then
+            reason=$(why)
+            tg deleteMessage --data-urlencode "chat_id=${CHAT}" --data-urlencode "message_id=${id}" || true
+            echo "табло №${id} не закреплено (${reason}) — снято, чтобы не множить; нужно право бота закреплять" >&2
+            exit 1
+          fi
           echo "табло поставлено и закреплено (№${id})"
