@@ -38,6 +38,7 @@ import {
 import { getVia, readCert } from "./door-probe.mjs";
 // Две двери — две точки наблюдения: сведение и правило «кто пишет в Telegram» (01.11.2026).
 import { POINT_FILE, mayTalk, mergePeer, pointOf } from "./peers.mjs";
+import { VIA_GITHUB, dispatchRelay } from "./relay.mjs";
 import { probeDnsProvider } from "./dns-probe.mjs";
 // Взаимная проверка с нескольких точек: голоса дверей «из России» (25.10.2026).
 import { fetchVote, controlsReachable, applyMesh, matrixLines, shouldAsk, nextAskState, cutoffNotice, AUTH_BACKOFF_S } from "./mesh.mjs";
@@ -85,6 +86,13 @@ const config = JSON.parse(readFileSync(process.env.STATUS_TARGETS ?? "targets.js
  */
 let talkAllowed = true;
 
+async function relayViaGithub(text, capMs) {
+  const r = await dispatchRelay("message", text, capMs);
+  console.log(`телеграм через GitHub: ${r.ok ? "" : "ОТКАЗ — "}${r.why}`);
+  if (!r.ok) console.log(text.replace(/^/gm, "    │ "));
+  return r.ok;
+}
+
 async function telegram(text, capMs = TELEGRAM_TIMEOUT_MS) {
   if (!talkAllowed) {
     // Не отказ и не «не настроено»: пишет соседняя дверь. Текст — в частный журнал, чтобы было видно, что молчим осознанно.
@@ -92,6 +100,7 @@ async function telegram(text, capMs = TELEGRAM_TIMEOUT_MS) {
     console.log(text.replace(/^/gm, "    │ "));
     return false;
   }
+  if (VIA_GITHUB) return relayViaGithub(text, capMs);
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
@@ -471,10 +480,12 @@ for (const text of alertTexts(moved, view, stamp, STATUS_PAGE, matrix)) await te
  * подтверждённость гистерезиса.
  */
 // Аватар и табло — тоже Telegram: запасная дверь их не трогает, пока основная пишет сама (`talkAllowed`).
-const avatar = talkAllowed
+// Фото канала через пересылку GitHub не ставится (нужна загрузка файла и уборка служебного поста) —
+// на дверях оно не трогается вовсе, а не пытается достучаться до недоступного Telegram каждую минуту.
+const avatar = talkAllowed && !VIA_GITHUB
   ? await syncAvatar(view.overall, { protectedIds: [loadBoard().messageId] })
   : { observed: view.overall, state: null, changed: false, persisted: false };
-console.log(`аватар: наблюдаем «${avatar.observed}», на канале «${avatar.state ?? "—"}»${avatar.changed ? " (сменили)" : ""}${talkAllowed ? "" : " — молчу, пишет основная дверь"}`);
+console.log(`аватар: наблюдаем «${avatar.observed}», на канале «${avatar.state ?? "—"}»${avatar.changed ? " (сменили)" : ""}${!talkAllowed ? " — молчу, пишет основная дверь" : VIA_GITHUB ? " — не трогаем: Telegram через GitHub" : ""}`);
 
 /**
  * ТАБЛО — ПОСЛЕДНИМ, и порядок здесь такой же содержательный, как у аватара.
@@ -488,7 +499,7 @@ console.log(`аватар: наблюдаем «${avatar.observed}», на ка�
  * само. Довод целиком — в `avatar.mjs`.
  */
 const board = talkAllowed
-  ? await syncBoard(view, stamp, STATUS_PAGE, { changed, mesh: meshed.mesh })
+  ? await syncBoard(view, stamp, STATUS_PAGE, { changed })
   : { mode: "молчу", messageId: null, why: "пишет основная дверь" };
 console.log(`табло: ${board.mode}${board.messageId ? ` (№${board.messageId})` : ""} — ${board.why}`);
 

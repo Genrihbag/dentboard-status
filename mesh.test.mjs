@@ -15,7 +15,6 @@ import { join } from "node:path";
 import { decideRow, ruEvidence, voteView, applyMesh, matrixLines, fetchVote, nlSaw, shouldAsk, nextAskState, cutoffNotice } from "./mesh.mjs";
 import { CUTOFF_HOLD_ROUNDS } from "./layout.mjs";
 import { evaluate, transitions, previousStates, previousRows, publicView, alertTexts, LAYOUT } from "./layout.mjs";
-import { boardText } from "./board.mjs";
 
 // Образец настройки С СЕТКОЙ NL (01.11.2026): боевой targets.json её больше не несёт — опрос перешёл
 // на двери (peers.mjs). Код сетки остаётся проверенным на случай возврата наблюдателя в Европе.
@@ -117,11 +116,7 @@ test("ТОЛЬКО NL НЕ ВИДИТ (порвана дорога NL→РФ): �
   assert.equal(r.v.overall, "up");
   for (const id of ["app", "portal", "site", "server", "lb1", "lb2"]) assert.equal(row(r.v, id).state, "up", id);
   assert.match(r.matrix.join("\n"), /Из Европы не видно, из России видно: Кабинет лаборатории/);
-  // Табло (26.10.2026) — таблица: из Европы «нет», из России — замер; пометка курсивом под таблицей.
-  const board = boardText(r.v, "t", "x", r.mesh);
-  assert.match(board, /✅ Балансировщик 2\s+нет\s+12 мс/);
-  assert.match(board, /✅ База данных и кэш\s+нет\s+45 мс/);
-  assert.match(board, /<i>Из Европы не видно, из России видно: Кабинет лаборатории/);
+  // Табло голоса NL/RU больше не показывает (01.11.2026: опрос на дверях, одна колонка без шапки).
 });
 
 test("ЗДЕСЬ ТРЕВОГА ОБЯЗАНА БЫТЬ: никто не видит (NL без ответа, обе двери — прод down) — «Сбой» сразу", () => {
