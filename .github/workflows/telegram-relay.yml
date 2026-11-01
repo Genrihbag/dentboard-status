@@ -5,12 +5,16 @@
 # вовсе). GitHub с дверей открывается, а токен бота уже лежит в секретах репозитория. Дверь просит
 # запустить это задание (workflow_dispatch) — сообщение уходит в канал отсюда, из-за границы.
 #
+# Два режима: `message` — новое сообщение (сбой, подъём); `board` — поправить закреплённое табло.
+# Номер табла двери не знают и не хранят: задание берёт его у самого канала (getChat → pinned_message).
+#
 # ⚠️ ТЕКСТ ИДЁТ ЧЕРЕЗ ПЕРЕМЕННУЮ ОКРУЖЕНИЯ, а не подстановкой `${{ }}` в скрипт: подстановка вставила
 # бы чужой текст прямо в оболочку, и кавычка в сообщении стала бы командой.
 #
-# ⚠️ БЕЗ concurrency: GitHub держит в группе не больше ОДНОГО ждущего запуска и выбрасывает
-# остальные — подряд пришедшие «Сбой» и «Работает» потеряли бы одно из двух. Порядок двух сообщений
-# за одну минуту может поменяться, потеря — нет.
+# ⚠️ ОЧЕРЕДЬ — ТОЛЬКО У ТАБЛА. GitHub держит в группе не больше ОДНОГО ждущего запуска и выбрасывает
+# остальные: для табла это и нужно (важен последний текст, а два одновременных «табла нет» завели бы
+# два табла), а подряд пришедшие «Сбой» и «Работает» потеряли бы одно из двух — поэтому у сообщений
+# группа своя на каждый запуск, то есть очереди нет.
 #
 # Доступ на запуск — отдельный токен GitHub на дверях (только Actions: write этого репозитория);
 # копия — в Yandex Lockbox, секрет `dentboard-status-telegram`.
@@ -23,8 +27,18 @@ on:
         description: "Текст сообщения (разметка HTML)"
         required: true
         type: string
+      mode:
+        description: "message — новое сообщение; board — поправить закреплённое табло"
+        required: false
+        default: message
+        type: choice
+        options: [message, board]
 
 permissions: {}
+
+concurrency:
+  group: ${{ inputs.mode == 'board' && 'telegram-board' || format('telegram-message-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   send:
@@ -36,17 +50,55 @@ jobs:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           TEXT: ${{ inputs.text }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -Eeuo pipefail
-          code=$(curl -sS --retry 3 --retry-all-errors -o resp.json -w "%{http_code}" \
-            -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${CHAT}" \
-            --data-urlencode "text=${TEXT}" \
-            --data-urlencode "parse_mode=HTML" \
-            --data-urlencode "disable_web_page_preview=true")
-          # Отказ Telegram — ОТКАЗ ЗАДАНИЯ с причиной словами, а не зелёная галочка без сообщения.
-          if [ "$(jq -r .ok resp.json)" != "true" ]; then
-            echo "Telegram отказал ($code): $(jq -r '.description // "ответ не разобран"' resp.json)" >&2
-            exit 1
+          # Один вызов Bot API: ответ в resp.json, «ok» — признак успеха (код HTTP у отказа бывает и 200).
+          tg() {
+            local method=$1; shift
+            curl -sS --retry 3 --retry-all-errors -o resp.json -X POST "https://api.telegram.org/bot${TOKEN}/${method}" "$@" || true
+            [ "$(jq -r .ok resp.json 2> /dev/null)" = "true" ]
+          }
+          why() { jq -r '.description // "ответ не разобран"' resp.json 2> /dev/null || echo "ответа нет"; }
+          send() {
+            tg sendMessage --data-urlencode "chat_id=${CHAT}" --data-urlencode "text=${TEXT}" \
+              --data-urlencode "parse_mode=HTML" --data-urlencode "disable_web_page_preview=true" "$@"
+          }
+
+          if [ "${MODE:-message}" != "board" ]; then
+            # Отказ Telegram — ОТКАЗ ЗАДАНИЯ с причиной словами, а не зелёная галочка без сообщения.
+            send || { echo "Telegram отказал: $(why)" >&2; exit 1; }
+            echo "отправлено"
+            exit 0
           fi
-          echo "отправлено ($code)"
+
+          # ── ТАБЛО: поправить закреплённое; нет его или оно не наше — поставить новое и закрепить ──
+          tg getChat --data-urlencode "chat_id=${CHAT}" || { echo "getChat: $(why)" >&2; exit 1; }
+          pinned=$(jq -r '.result.pinned_message.message_id // empty' resp.json)
+          # Закреплено что-то другое (владелец закрепил объявление) — его не трогаем, а ставим табло рядом.
+          if [ -n "$pinned" ] && ! jq -e '.result.pinned_message.text // "" | startswith("DentBoard — состояние")' resp.json > /dev/null; then
+            echo "закреплено №${pinned}, но это не табло — не трогаю, ставлю новое"
+            pinned=
+          fi
+          if [ -n "$pinned" ]; then
+            if tg editMessageText --data-urlencode "chat_id=${CHAT}" --data-urlencode "message_id=${pinned}" \
+              --data-urlencode "text=${TEXT}" --data-urlencode "parse_mode=HTML" --data-urlencode "disable_web_page_preview=true"; then
+              echo "табло поправлено (№${pinned})"; exit 0
+            fi
+            reason=$(why)
+            # Тот же текст — делать нечего, это не отказ.
+            case "$reason" in *"message is not modified"*) echo "табло: текст тот же (№${pinned})"; exit 0 ;; esac
+            # ⚠️ НОВОЕ ТАБЛО — ТОЛЬКО когда закреплённое править НЕЛЬЗЯ В ПРИНЦИПЕ (удалено, не от бота).
+            # Любой другой отказ (частота, сбой Telegram) — отказ задания: иначе каждый такой круг
+            # заводил бы ещё одно закреплённое табло.
+            case "$reason" in
+              *"message to edit not found"* | *"message can't be edited"*) echo "закреплённое №${pinned} не править: ${reason} — ставлю новое" ;;
+              *) echo "табло №${pinned}: Telegram отказал: ${reason}" >&2; exit 1 ;;
+            esac
+          fi
+          send --data-urlencode "disable_notification=true" || { echo "табло не отправлено: $(why)" >&2; exit 1; }
+          id=$(jq -r .result.message_id resp.json)
+          # Закрепление — отдельное право бота: его нет — табло всё равно в канале, но это надо ВИДЕТЬ.
+          tg pinChatMessage --data-urlencode "chat_id=${CHAT}" --data-urlencode "message_id=${id}" \
+            --data-urlencode "disable_notification=true" || { echo "табло №${id} отправлено, НО не закреплено: $(why)" >&2; exit 1; }
+          echo "табло поставлено и закреплено (№${id})"
