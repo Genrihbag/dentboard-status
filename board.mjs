@@ -24,6 +24,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { icon } from "./layout.mjs";
 import { signalWithin, TELEGRAM_TIMEOUT_MS } from "./budget.mjs";
 import { describeError } from "./error-detail.mjs";
+import { VIA_GITHUB, dispatchRelay } from "./relay.mjs";
 
 /** Рядом с историей и решением по аве: одно место для состояния наблюдателя. */
 const STATE = "data/board.json";
@@ -45,6 +46,14 @@ const STATE = "data/board.json";
 export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 50 / 60) * 60_000;
 
 /**
+ * Через GitHub (двери, 01.11.2026) — раз в ПЯТЬ минут: каждая правка там — запуск задания, и поминутно
+ * это 1440 запусков в сутки ради витрины. Смена состояния интервала по-прежнему не ждёт.
+ * ⚠️ Переменная СВОЯ: общая с `STATUS_BOARD_MIN_MINUTES` (поминутно по решению 26.10) тихо вернула бы
+ * 1440 запусков (ревью 01.11.2026).
+ */
+export const RELAY_INTERVAL_MS = Number(process.env.STATUS_BOARD_RELAY_MINUTES ?? 5) * 60_000;
+
+/**
  * СОБРАТЬ ТЕКСТ ТАБЛО. Чистая функция — проверяется образцами, без сети.
  *
  * ⚠️ ВРЕМЯ ПРОВЕРКИ СТОИТ ВТОРОЙ СТРОКОЙ, И ЭТО НЕ УКРАШЕНИЕ. Замёрзшее табло выглядит как
@@ -57,39 +66,27 @@ export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 50
  * цвет авы: «что считать медленным» обязано жить в одном месте, иначе табло и ава однажды скажут
  * разное об одном и том же прогоне, и правым будет выглядеть тот, на кого смотрят.
  */
-export function boardText(view, stamp, statusPage, mesh = null) {
+export function boardText(view, stamp, statusPage) {
   /**
    * ТАБЛИЦЕЙ (решение владельца 26.10.2026: «простыня с провайдерами» не читалась). Строки — цели,
-   * колонки — значок, имя, время ответа из Европы (🇳🇱) и из России (🇷🇺, голоса балансировщиков:
-   * прод — для «API» и «Базы данных и кэша», соседняя дверь — для балансировщика, pages.* в голосе —
-   * для трёх страниц пользователей). Во ВСЕЙ колонке 🇷🇺 — СРЕДНЕЕ по двум балансировщикам (решение
-   * владельца 26.10.2026, расширено с трёх строк страниц на всю колонку: было «меньший из
-   * ответивших» — минимум у ОДНОЙ И ТОЙ ЖЕ цели с двух точек обманывает разницу между ними); один
-   * голос — его значение, ни одного — «—». Где из России замера нет вовсе — «—». Ровные колонки —
-   * в <pre>: Telegram рисует его моноширинным.
+   * колонки — значок, имя и задержка: время ответа с дверей (сведённое по двум, см. peers.mjs).
+   * Ровные колонки — в <pre>: Telegram рисует его моноширинным.
    *
-   * ⚠️ ШАПКА — ФЛАГИ, А НЕ БУКВЫ (решение владельца 26.10.2026). Флаг ШИРЕ буквы в моноширинном
-   * выводе (два знакоместа против одного), поэтому ширина столбца и отступы считаются `cellWidth`
-   * (по графемам), а не `.length` — см. комментарий у неё.
+   * ⚠️ ШАПКИ НЕТ И КОЛОНКА ОДНА (решение владельца 01.11.2026: «nl убери… убери шапку закрепа, я и
+   * так пойму»). Было две колонки — из Европы (🇳🇱) и из России (🇷🇺, голоса балансировщиков); с
+   * переездом опроса на двери Европы не стало, а колонка России и есть теперь единственный замер.
    *
    * ⚠️ ПРОВАЙДЕРОВ И АДРЕСОВ ЗДЕСЬ НЕТ — они в событийных сообщениях «Сбой / Внимание». Причины
    * отказов — тоже там; здесь слово («нет», «код 502») и фраза группы под таблицей.
-   * ⚠️ Раздел «Кто кого видит» снят — его заменяет колонка 🇷🇺.
    */
   const rows = view.groups.flatMap((g) => g.rows);
-  const ru = ruTable(mesh);
-  const cells = rows.map((r) => [icon(r), r.name, nlCell(r), ruCell(r, ru, view)]);
-  const nameW = Math.max(4, ...cells.map((c) => cellWidth(c[1])));
-  const nlW = Math.max(2, ...cells.map((c) => cellWidth(c[2])));
-  const ruW = Math.max(2, ...cells.map((c) => cellWidth(c[3])));
-  // Значок — эмодзи, его ширина в моноширинном шрифте одинакова у всех строк; в шапке — два пробела.
-  const line = (ic, name, nl, ruv) => `${ic} ${padEndW(name, nameW)}  ${padStartW(nl, nlW)}  ${padStartW(ruv, ruW)}`;
-  const table = [line("  ", "Цель", "🇳🇱", "🇷🇺"), ...cells.map((c) => line(...c))].join("\n");
+  const cells = rows.map((r) => [icon(r), r.name, valueCell(r)]);
+  const nameW = Math.max(...cells.map((c) => cellWidth(c[1])));
+  const valW = Math.max(...cells.map((c) => cellWidth(c[2])));
+  const table = cells.map(([ic, name, v]) => `${ic} ${padEndW(name, nameW)}  ${padStartW(v, valW)}`).join("\n");
 
-  // Под таблицей — то, что требует слов: фразы групп («вход работает через второй») и пометки точек.
+  // Под таблицей — то, что требует слов: фразы групп («вход работает через второй»).
   const notes = view.groups.filter((g) => g.summary).map((g) => `<i>${esc(g.summary)}</i>`);
-  if (mesh?.notes?.ruUp?.length) notes.push(`<i>Из Европы не видно, из России видно: ${esc(mesh.notes.ruUp.join(", "))}</i>`);
-  if (mesh?.notes?.cutoff) notes.push("<i>Из Европы нет связи с Россией — показано прежнее состояние</i>");
 
   const text = [
     "<b>DentBoard — состояние</b>",
@@ -117,17 +114,9 @@ export function boardText(view, stamp, statusPage, mesh = null) {
 export const TELEGRAM_LIMIT = 4096;
 
 /**
- * ШИРИНА ЯЧЕЙКИ В МОНОШИРИННОМ `<pre>` — ПО ГРАФЕМАМ, А НЕ ПО `.length` И НЕ ПО КОДОВЫМ ТОЧКАМ
- * (решение владельца 26.10.2026: шапка «NL»/«RU» → флаги 🇳🇱/🇷🇺).
- *
- * 🔴 ФЛАГ — ОДНА графема из ДВУХ кодовых точек региональных индикаторов. `.length` (UTF-16) у него
- * РАВЕН 4 — суррогатная пара на каждую точку. Посчитай ширину по `.length`, и `padStart` решит, что
- * флаг уже «длиннее» нужной ширины, и недодаст пробелов ИМЕННО тогда, когда столбец шире двух
- * знакомест (любая цифра времени ответа длиннее «NL») — колонки разъедутся не в образце с коротким
- * «—», а в боевом табло. `Array.from`/спред (код-ТОЧКИ) дал бы 2 — случайно верно для одного флага,
- * но это совпадение для ОДНОЙ графемы, а не правило: графемой может быть и более длинная
- * последовательность. Эмодзи и флаг в моноширинном выводе занимают ДВА знакоместа, как иероглиф;
- * остальное (буквы, цифры, «—») — одно.
+ * ШИРИНА ЯЧЕЙКИ В МОНОШИРИННОМ `<pre>` — ПО ГРАФЕМАМ, А НЕ ПО `.length`: эмодзи и флаг занимают два
+ * знакоместа, как иероглиф, а `.length` у флага равен 4 (суррогатные пары). В именах и значениях сейчас
+ * их нет, но счёт по графемам ничего не стоит и не ломается от первого же эмодзи в названии цели.
  */
 function cellWidth(s) {
   const WIDE = /\p{Regional_Indicator}|\p{Extended_Pictographic}/u;
@@ -139,8 +128,8 @@ function cellWidth(s) {
 const padStartW = (s, width) => (width > cellWidth(s) ? " ".repeat(width - cellWidth(s)) + s : s);
 const padEndW = (s, width) => (width > cellWidth(s) ? s + " ".repeat(width - cellWidth(s)) : s);
 
-/** NL — время ответа строки или слово: «нет» (не ответила), «код 502», DNS — «4/4», сертификат — «89 дн». */
-function nlCell(r) {
+/** Задержка — время ответа строки или слово: «нет» (не ответила), «код 502», DNS — «4/4», сертификат — «89 дн». */
+function valueCell(r) {
   if (r.state === "unknown") return "—";
   if (r.kind === "cert") {
     // Удержанный сертификат (layout.mjs, первый сбой балансировщиков) несёт дни только в value —
@@ -155,90 +144,6 @@ function nlCell(r) {
   }
   if (r.state === "down") return r.status ? `код ${r.status}` : "нет";
   return typeof r.ms === "number" ? `${r.ms} мс` : "нет";
-}
-
-/** Три страницы пользователей (26.10.2026, ztl-lab observer.sh `pages`): лаборатория, портал, сайт. */
-const PAGE_KEYS = ["lab", "portal", "site"];
-
-/** Целое среднее по накопленным мс (не меньшее!) — см. комментарий у `ruTable`. */
-const avgMs = (arr) => Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
-
-/**
- * Замеры из России по свежим голосам: прод, каждая дверь глазами соседа (балансировщики) и три
- * страницы пользователей (`pages.*` в голосе) — у ВСЕЙ колонки 🇷🇺 ОДНО правило (решение владельца
- * 26.10.2026, расширено с трёх строк страниц на всю колонку):
- *
- * ⚠️ СРЕДНЕЕ ПО ДВУМ ГОЛОСАМ, НЕ МЕНЬШЕЕ. Прод/страница/соседняя дверь — ОДНА И ТА ЖЕ цель с двух
- * точек, и «меньший из ответивших» ЗАНИЖАЕТ то, что видит человек: минимум по двум одинаковым путям
- * обманывает разницу между ними (раньше здесь было «меньший» для прода — это и была ошибка, которую
- * правили). Один голос с числом — он и есть среднее (среднее одного числа — оно само); голосов с
- * числом нет вовсе — «—»; ни один код не 200 — слово («нет»/«код N»), как и раньше.
- *
- * Голос двери с лежащей своей сетью (прод `unknown`) про соседа и про страницы не говорит — его
- * «не отвечает» про её сеть, а не про цель (то же правило, что в mesh.mjs ruEvidence).
- */
-export function ruTable(mesh) {
-  const out = { prod: null, peers: {}, pages: { lab: null, portal: null, site: null } };
-  const prodMs = [];
-  let prodFallback = null;
-  const peerMs = {};
-  const peerFallback = {};
-  const pageMs = { lab: [], portal: [], site: [] };
-  const pageFallback = { lab: null, portal: null, site: null };
-  for (const v of mesh?.votes ?? []) {
-    if (!v.fresh) continue;
-    if (v.prod?.code === "200") {
-      if (typeof v.prod.ms === "number") prodMs.push(v.prod.ms);
-      else prodFallback ??= "да";
-    } else if (v.prod && v.prod.state !== "unknown") {
-      prodFallback ??= /^\d+$/.test(v.prod.code) && v.prod.code !== "000" ? `код ${v.prod.code}` : "нет";
-    }
-    for (const p of PAGE_KEYS) {
-      const page = v.pages?.[p];
-      if (!page) continue;
-      if (page.code === "200" && typeof page.ms === "number") pageMs[p].push(page.ms);
-      else if (page.code === "200") pageFallback[p] ??= "да";
-      else if (v.prod?.state !== "unknown") pageFallback[p] ??= /^\d+$/.test(page.code) && page.code !== "000" ? `код ${page.code}` : "нет";
-    }
-    if (!v.peer?.addr) continue;
-    const addr = v.peer.addr;
-    peerMs[addr] ??= [];
-    if (v.peer.state === "up") {
-      if (typeof v.peer.ms === "number") peerMs[addr].push(v.peer.ms);
-      else peerFallback[addr] ??= "да";
-    } else if (v.peer.state === "down") {
-      peerFallback[addr] ??= /^\d+$/.test(v.peer.code) && v.peer.code !== "000" ? `код ${v.peer.code}` : "нет";
-    } else if (v.peer.state === "unreachable" && v.prod?.state !== "unknown") {
-      peerFallback[addr] ??= "нет";
-    }
-  }
-  out.prod = prodMs.length ? avgMs(prodMs) : prodFallback;
-  for (const addr of Object.keys(peerMs)) out.peers[addr] = peerMs[addr].length ? avgMs(peerMs[addr]) : (peerFallback[addr] ?? null);
-  for (const p of PAGE_KEYS) out.pages[p] = pageMs[p].length ? avgMs(pageMs[p]) : pageFallback[p];
-  return out;
-}
-
-/** Строка цели → ключ в `ru.pages` (id из targets.json, группа «Для пользователей»). */
-const PAGE_ROW_TO_KEY = { app: "lab", portal: "portal", site: "site" };
-
-/** Строки сервера — по виду пробы (готовность и живость в группе с готовностью), а не по id. */
-function isServerRow(r, view) {
-  if (r.kind === "ready") return true;
-  if (r.kind !== "http") return false;
-  return view.groups.some((g) => g.rows.includes(r) && g.rows.some((x) => x.kind === "ready"));
-}
-
-/** `null` → «—»; число (мс-среднее) → «N мс»; слово-фолбэк («нет»/«код N»/«да») — как есть. */
-const fmtRu = (v) => (v === null || v === undefined ? "—" : typeof v === "number" ? `${v} мс` : v);
-
-function ruCell(r, ru, view) {
-  // Удержанная строка (первый сбой, отрезанность) показывает прежнее — свежий русский замер выдал бы
-  // то, что удержание прячет (ревью 26.10.2026).
-  if (r.suspect || r.cutoff || r.heldNote) return "—";
-  if (r.kind === "balancer") return r.ip ? fmtRu(ru.peers[r.ip]) : "—";
-  if (PAGE_ROW_TO_KEY[r.id]) return fmtRu(ru.pages[PAGE_ROW_TO_KEY[r.id]]);
-  if (isServerRow(r, view)) return fmtRu(ru.prod);
-  return "—";
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -345,14 +250,16 @@ async function sendAndPin(token, chat, text) {
  * собой запись истории, которая уже сделана к этому моменту.
  *
  * Возвращает `{ acted, mode, messageId, why }` — по `mode` видно, что именно произошло:
- * `edited` · `sent` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
+ * `edited` · `sent` · `relayed` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
  * «Telegram отказал» в одно значение, а они требуют разных действий.
  */
-export async function syncBoard(view, stamp, statusPage, { changed = false, mesh = null } = {}) {
+export async function syncBoard(view, stamp, statusPage, { changed = false } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
-  const nextText = boardText(view, stamp, statusPage, mesh);
-  if (!token || !chat) {
+  const nextText = boardText(view, stamp, statusPage);
+  // Через GitHub токен бота дверям не нужен — он в секретах репозитория (ревью 01.11.2026: иначе
+  // табло молча «off» при настроенной пересылке).
+  if (!VIA_GITHUB && (!token || !chat)) {
     // Текст печатается: журнал частный, а подменный круг без него не показал бы, что встало бы в канал.
     console.log("[табло] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — табло не трогаем. Текст:");
     console.log(nextText.replace(/^/gm, "    │ "));
@@ -366,11 +273,22 @@ export async function syncBoard(view, stamp, statusPage, { changed = false, mesh
     now: Date.now(),
     lastText: prev.text,
     nextText,
+    minIntervalMs: VIA_GITHUB ? RELAY_INTERVAL_MS : MIN_INTERVAL_MS,
   });
 
   if (d.act === "skip") {
     console.log(`[табло] не правим: ${d.why}`);
     return { acted: false, mode: "skipped", messageId: prev.messageId ?? null, why: d.why };
+  }
+
+  // Через GitHub номер табла двери не знают: задание само находит закреплённое (getChat) и правит его,
+  // а если его нет или оно не наше — ставит новое и закрепляет (telegram-relay.yml, режим board).
+  if (VIA_GITHUB) {
+    const r = await dispatchRelay("board", nextText, TELEGRAM_TIMEOUT_MS);
+    console.log(`[табло] через GitHub: ${r.why} (${d.why})`);
+    if (!r.ok) return { acted: false, mode: "skipped", messageId: null, why: r.why };
+    saveBoard({ messageId: null, text: nextText, editedAt: new Date().toISOString() });
+    return { acted: true, mode: "relayed", messageId: null, why: d.why };
   }
 
   if (prev.messageId) {

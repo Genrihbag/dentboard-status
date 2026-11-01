@@ -66,6 +66,13 @@ publish_local() {
   mv -f "$SITE_DIR/.index.html.new" "$SITE_DIR/index.html"
   install -m 0644 data/history.json "$SITE_DIR/data/.history.json.new"
   mv -f "$SITE_DIR/data/.history.json.new" "$SITE_DIR/data/history.json"
+
+  # Своё наблюдение для соседней двери (01.11.2026, peers.mjs): соседка забирает его с этой страницы.
+  # Нет файла — не дверь (одиночный наблюдатель), публиковать нечего.
+  if [ -f data/point.json ]; then
+    install -m 0644 data/point.json "$SITE_DIR/data/.point.json.new"
+    mv -f "$SITE_DIR/data/.point.json.new" "$SITE_DIR/data/point.json"
+  fi
 }
 
 # ⚠️ ПУБЛИКАЦИЯ В `gh-pages` ПЛОСКИМ GIT — запасной путь, когда своего сайта нет. Одним оторванным

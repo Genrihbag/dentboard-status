@@ -15,9 +15,10 @@ import { join } from "node:path";
 import { decideRow, ruEvidence, voteView, applyMesh, matrixLines, fetchVote, nlSaw, shouldAsk, nextAskState, cutoffNotice } from "./mesh.mjs";
 import { CUTOFF_HOLD_ROUNDS } from "./layout.mjs";
 import { evaluate, transitions, previousStates, previousRows, publicView, alertTexts, LAYOUT } from "./layout.mjs";
-import { boardText } from "./board.mjs";
 
-const CONFIG = JSON.parse(readFileSync(new URL("./targets.json", import.meta.url), "utf8"));
+// Образец настройки С СЕТКОЙ NL (01.11.2026): боевой targets.json её больше не несёт — опрос перешёл
+// на двери (peers.mjs). Код сетки остаётся проверенным на случай возврата наблюдателя в Европе.
+const CONFIG = JSON.parse(readFileSync(new URL("./mesh.fixture.json", import.meta.url), "utf8"));
 const NOW = 1_800_000_000;
 const NOW_ISO = new Date(NOW * 1000).toISOString();
 
@@ -115,11 +116,7 @@ test("ТОЛЬКО NL НЕ ВИДИТ (порвана дорога NL→РФ): �
   assert.equal(r.v.overall, "up");
   for (const id of ["app", "portal", "site", "server", "lb1", "lb2"]) assert.equal(row(r.v, id).state, "up", id);
   assert.match(r.matrix.join("\n"), /Из Европы не видно, из России видно: Кабинет лаборатории/);
-  // Табло (26.10.2026) — таблица: из Европы «нет», из России — замер; пометка курсивом под таблицей.
-  const board = boardText(r.v, "t", "x", r.mesh);
-  assert.match(board, /✅ Балансировщик 2\s+нет\s+12 мс/);
-  assert.match(board, /✅ База данных и кэш\s+нет\s+45 мс/);
-  assert.match(board, /<i>Из Европы не видно, из России видно: Кабинет лаборатории/);
+  // Табло голоса NL/RU больше не показывает (01.11.2026: опрос на дверях, одна колонка без шапки).
 });
 
 test("ЗДЕСЬ ТРЕВОГА ОБЯЗАНА БЫТЬ: никто не видит (NL без ответа, обе двери — прод down) — «Сбой» сразу", () => {
