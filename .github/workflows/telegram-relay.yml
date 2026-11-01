@@ -1,0 +1,52 @@
+# ПЕРЕСЫЛКА В TELEGRAM С ДВЕРЕЙ (01.11.2026).
+#
+# 🔴 ЗАЧЕМ. Опрос состояния переехал на двери (балансировщики Selectel и Yandex), а из их сетей
+# api.telegram.org недоступен — таймаут на всех адресах, IPv6 у дверей нет (у Yandex Cloud его нет
+# вовсе). GitHub с дверей открывается, а токен бота уже лежит в секретах репозитория. Дверь просит
+# запустить это задание (workflow_dispatch) — сообщение уходит в канал отсюда, из-за границы.
+#
+# ⚠️ ТЕКСТ ИДЁТ ЧЕРЕЗ ПЕРЕМЕННУЮ ОКРУЖЕНИЯ, а не подстановкой `${{ }}` в скрипт: подстановка вставила
+# бы чужой текст прямо в оболочку, и кавычка в сообщении стала бы командой.
+#
+# ⚠️ БЕЗ concurrency: GitHub держит в группе не больше ОДНОГО ждущего запуска и выбрасывает
+# остальные — подряд пришедшие «Сбой» и «Работает» потеряли бы одно из двух. Порядок двух сообщений
+# за одну минуту может поменяться, потеря — нет.
+#
+# Доступ на запуск — отдельный токен GitHub на дверях (только Actions: write этого репозитория);
+# копия — в Yandex Lockbox, секрет `dentboard-status-telegram`.
+name: Пересылка в Telegram
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Текст сообщения (разметка HTML)"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Отправить в канал
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEXT: ${{ inputs.text }}
+        run: |
+          set -Eeuo pipefail
+          code=$(curl -sS --retry 3 --retry-all-errors -o resp.json -w "%{http_code}" \
+            -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "disable_web_page_preview=true")
+          # Отказ Telegram — ОТКАЗ ЗАДАНИЯ с причиной словами, а не зелёная галочка без сообщения.
+          if [ "$(jq -r .ok resp.json)" != "true" ]; then
+            echo "Telegram отказал ($code): $(jq -r '.description // "ответ не разобран"' resp.json)" >&2
+            exit 1
+          fi
+          echo "отправлено ($code)"
