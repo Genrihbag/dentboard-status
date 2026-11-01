@@ -36,6 +36,8 @@ import {
 } from "./layout.mjs";
 // Балансировщик по адресу мимо DNS и сертификат, который он отдаёт; прямой вопрос провайдерам DNS.
 import { getVia, readCert } from "./door-probe.mjs";
+// Две двери — две точки наблюдения: сведение и правило «кто пишет в Telegram» (01.11.2026).
+import { POINT_FILE, mayTalk, mergePeer, pointOf } from "./peers.mjs";
 import { probeDnsProvider } from "./dns-probe.mjs";
 // Взаимная проверка с нескольких точек: голоса дверей «из России» (25.10.2026).
 import { fetchVote, controlsReachable, applyMesh, matrixLines, shouldAsk, nextAskState, cutoffNotice, AUTH_BACKOFF_S } from "./mesh.mjs";
@@ -77,7 +79,19 @@ const KEEP_EVENTS = 500;
  */
 const config = JSON.parse(readFileSync(process.env.STATUS_TARGETS ?? "targets.json", "utf8"));
 
+/**
+ * Может ли ЭТА машина писать в Telegram (двери, 01.11.2026, `peers.mjs` `mayTalk`). Решается после
+ * сведения с соседкой; до того — «да», как было у одиночного наблюдателя.
+ */
+let talkAllowed = true;
+
 async function telegram(text, capMs = TELEGRAM_TIMEOUT_MS) {
+  if (!talkAllowed) {
+    // Не отказ и не «не настроено»: пишет соседняя дверь. Текст — в частный журнал, чтобы было видно, что молчим осознанно.
+    console.log("телеграм: молчу — пишет основная дверь; сообщение было бы таким:");
+    console.log(text.replace(/^/gm, "    │ "));
+    return false;
+  }
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
@@ -242,8 +256,40 @@ httpTargets.forEach((t, i) => (raw[t.id] = probed[i]));
 (dnsGroup?.rows ?? []).forEach((row, i) => (raw[row.id] = dnsResults[i]));
 for (const row of certGroup?.rows ?? []) raw[row.id] = { perDoor: certResults };
 
+/**
+ * ДВЕ ДВЕРИ (01.11.2026, `peers.mjs`). На двери задано `STATUS_SELF` (её строка в группе
+ * балансировщиков): своё наблюдение публикуется для соседки, её наблюдение забирается с её страницы
+ * (по адресу соседки, с именем status.dentboard.ru — мимо DNS, который может отдать и себя). Без
+ * `STATUS_SELF` — прежний одиночный наблюдатель, ничего не меняется.
+ */
+const selfId = process.env.STATUS_SELF || null;
+const role = process.env.STATUS_ROLE === "backup" ? "backup" : "primary";
+let peered = { raw, fresh: false, viaPeer: [] };
+if (selfId) {
+  // Каталог — ДО записи: на чистой машине его ещё нет (ниже он создаётся только перед историей).
+  mkdirSync("data", { recursive: true });
+  writeFileSync(POINT_FILE, `${JSON.stringify(pointOf(selfId, raw, now))}\n`);
+  const peerRow = balancers.find((b) => b.id !== selfId);
+  let peer = null;
+  if (peerRow) {
+    try {
+      const res = await getVia(peerRow.ip, "status.dentboard.ru", `/${POINT_FILE}`, { signal: AbortSignal.timeout(5_000) });
+      peer = res.status === 200 ? JSON.parse(res.body) : null;
+      if (!peer) console.log(`соседка (${peerRow.id}): ответ ${res.status}`);
+    } catch (e) {
+      console.log(`соседка (${peerRow.id}): не забрали наблюдение — ${describeError(e)}`);
+    }
+  }
+  peered = mergePeer(raw, peer, { selfId, balancerIds: balancers.map((b) => b.id), nowMs: Date.now() });
+  talkAllowed = mayTalk(role, peered.fresh);
+  console.log(
+    `двери: я ${selfId} (${role === "backup" ? "запасная" : "основная"}), соседка ${peered.fresh ? "свежая" : "молчит"}` +
+      `${peered.viaPeer.length ? `, решено соседкой: ${peered.viaPeer.join(", ")}` : ""}; в Telegram ${talkAllowed ? "пишу" : "молчу"}`,
+  );
+}
+
 // Решение «кто кого видит» — до раскладки: отказ, который видит одна Европа, раскладка уже не видит.
-const meshed = applyMesh(config, raw, { fetched: Object.fromEntries(fetchedVotes.map((f) => [f.id, f])), controlsOk });
+const meshed = applyMesh(config, peered.raw, { fetched: Object.fromEntries(fetchedVotes.map((f) => [f.id, f])), controlsOk });
 const matrix = matrixLines(config, raw, meshed.mesh);
 
 // Прошлые строки — для «двух кругов подряд» у DNS и балансировщиков (`hold` в layout.mjs).
@@ -424,8 +470,11 @@ for (const text of alertTexts(moved, view, stamp, STATUS_PAGE, matrix)) await te
  * Слив их в одно значение означал бы коммит «сменилось состояние» там, где сменилась только
  * подтверждённость гистерезиса.
  */
-const avatar = await syncAvatar(view.overall, { protectedIds: [loadBoard().messageId] });
-console.log(`аватар: наблюдаем «${avatar.observed}», на канале «${avatar.state ?? "—"}»${avatar.changed ? " (сменили)" : ""}`);
+// Аватар и табло — тоже Telegram: запасная дверь их не трогает, пока основная пишет сама (`talkAllowed`).
+const avatar = talkAllowed
+  ? await syncAvatar(view.overall, { protectedIds: [loadBoard().messageId] })
+  : { observed: view.overall, state: null, changed: false, persisted: false };
+console.log(`аватар: наблюдаем «${avatar.observed}», на канале «${avatar.state ?? "—"}»${avatar.changed ? " (сменили)" : ""}${talkAllowed ? "" : " — молчу, пишет основная дверь"}`);
 
 /**
  * ТАБЛО — ПОСЛЕДНИМ, и порядок здесь такой же содержательный, как у аватара.
@@ -438,7 +487,9 @@ console.log(`аватар: наблюдаем «${avatar.observed}», на ка�
  * сообщение с номером `id - 1` вслепую, и с появлением табла этим соседом может оказаться оно
  * само. Довод целиком — в `avatar.mjs`.
  */
-const board = await syncBoard(view, stamp, STATUS_PAGE, { changed, mesh: meshed.mesh });
+const board = talkAllowed
+  ? await syncBoard(view, stamp, STATUS_PAGE, { changed, mesh: meshed.mesh })
+  : { mode: "молчу", messageId: null, why: "пишет основная дверь" };
 console.log(`табло: ${board.mode}${board.messageId ? ` (№${board.messageId})` : ""} — ${board.why}`);
 
 /* Признак «коммитить ли» отдаётся оболочке ЯВНО, а не выводится ею из текста вывода: разбор

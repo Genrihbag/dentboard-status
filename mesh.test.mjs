@@ -17,7 +17,9 @@ import { CUTOFF_HOLD_ROUNDS } from "./layout.mjs";
 import { evaluate, transitions, previousStates, previousRows, publicView, alertTexts, LAYOUT } from "./layout.mjs";
 import { boardText } from "./board.mjs";
 
-const CONFIG = JSON.parse(readFileSync(new URL("./targets.json", import.meta.url), "utf8"));
+// Образец настройки С СЕТКОЙ NL (01.11.2026): боевой targets.json её больше не несёт — опрос перешёл
+// на двери (peers.mjs). Код сетки остаётся проверенным на случай возврата наблюдателя в Европе.
+const CONFIG = JSON.parse(readFileSync(new URL("./mesh.fixture.json", import.meta.url), "utf8"));
 const NOW = 1_800_000_000;
 const NOW_ISO = new Date(NOW * 1000).toISOString();
 
