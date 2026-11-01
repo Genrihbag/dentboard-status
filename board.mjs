@@ -48,8 +48,10 @@ export const MIN_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 50
 /**
  * Через GitHub (двери, 01.11.2026) — раз в ПЯТЬ минут: каждая правка там — запуск задания, и поминутно
  * это 1440 запусков в сутки ради витрины. Смена состояния интервала по-прежнему не ждёт.
+ * ⚠️ Переменная СВОЯ: общая с `STATUS_BOARD_MIN_MINUTES` (поминутно по решению 26.10) тихо вернула бы
+ * 1440 запусков (ревью 01.11.2026).
  */
-export const RELAY_INTERVAL_MS = Number(process.env.STATUS_BOARD_MIN_MINUTES ?? 5) * 60_000;
+export const RELAY_INTERVAL_MS = Number(process.env.STATUS_BOARD_RELAY_MINUTES ?? 5) * 60_000;
 
 /**
  * СОБРАТЬ ТЕКСТ ТАБЛО. Чистая функция — проверяется образцами, без сети.
@@ -248,14 +250,16 @@ async function sendAndPin(token, chat, text) {
  * собой запись истории, которая уже сделана к этому моменту.
  *
  * Возвращает `{ acted, mode, messageId, why }` — по `mode` видно, что именно произошло:
- * `edited` · `sent` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
+ * `edited` · `sent` · `relayed` · `skipped` · `off`. Один общий `false` слил бы «не настроено», «рано» и
  * «Telegram отказал» в одно значение, а они требуют разных действий.
  */
 export async function syncBoard(view, stamp, statusPage, { changed = false } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
   const nextText = boardText(view, stamp, statusPage);
-  if (!token || !chat) {
+  // Через GitHub токен бота дверям не нужен — он в секретах репозитория (ревью 01.11.2026: иначе
+  // табло молча «off» при настроенной пересылке).
+  if (!VIA_GITHUB && (!token || !chat)) {
     // Текст печатается: журнал частный, а подменный круг без него не показал бы, что встало бы в канал.
     console.log("[табло] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы — табло не трогаем. Текст:");
     console.log(nextText.replace(/^/gm, "    │ "));

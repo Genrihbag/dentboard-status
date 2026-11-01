@@ -102,6 +102,16 @@ else
 # Токен бота и чат, куда слать сбои. Получить chat_id: написать боту /chatid в нужном чате.
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+# ── На дверях (балансировщиках, 01.11.2026) ──
+# Чья это строка балансировщика (lb1|lb2) и кто пишет в Telegram (primary|backup) — peers.mjs.
+#STATUS_SELF=
+#STATUS_ROLE=
+# Telegram из сетей дверей недоступен: отправка через задание telegram-relay.yml. Токен GitHub —
+# только Actions: write этого репозитория; копия в Yandex Lockbox, секрет dentboard-status-telegram.
+#STATUS_TG_VIA=github
+#GITHUB_RELAY_TOKEN=
+# Как часто править табло через GitHub, когда ничего не менялось (по умолчанию 5 минут).
+#STATUS_BOARD_RELAY_MINUTES=
 ENVEOF
   chmod 600 "$ENV_FILE"
   chown "$USER_NAME:$USER_NAME" "$ENV_FILE"
